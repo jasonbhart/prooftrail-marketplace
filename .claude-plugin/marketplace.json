@@ -10,7 +10,7 @@
     {
       "name": "prooftrail",
       "source": "./prooftrail",
-      "description": "Supervisory review gate: sends the session's prompt and final output to a hosted review service for advisory feedback."
+      "description": "Prooftrail — independent review for AI coding agents. Sends the session's prompt and final output to a hosted judge and returns advisory feedback plus an audit trail. Never blocks."
     }
   ]
 }
