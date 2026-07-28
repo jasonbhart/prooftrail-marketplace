@@ -95,6 +95,23 @@ token never transits chat).
    If the script exits non-zero instead, relay its stderr (e.g. "request a fresh
    code") — codes are single-use and expire in 10 minutes — and stop.
 
+5. **Tell the user to restart their session — pairing alone does NOT start reviews.**
+   On a successful pair, always finish with:
+
+   > Restart your Claude Code session to activate reviews. Pairing is saved, but
+   > the hooks don't start firing until a session that begins after the install.
+
+   This is not optional politeness. Claude Code snapshots plugin state at session
+   start (docs/05 bug register, upstream #68020), so a plugin installed mid-session
+   has its **skill** available immediately — which is how this pairing flow ran at
+   all — while its **hooks are not wired**. Verified 2026-07-28 on a real install:
+   after a successful pair, the session ended and *nothing happened*. No captured
+   prompt, no review, no notice. Every visible signal said it was working.
+
+   That silence is the failure mode to prevent: the user sees the skill appear,
+   pairs, gets `connected as … (free, N/50 reviews)`, and concludes the product is
+   running when it is completely inert. Say the restart line every time.
+
 ## Notes
 - Tokens are per-surface (host / local-VM / cloud). If the user works across surfaces,
   each pairs once. Sandbox data dirs are ephemeral (exp-05) — `${CLAUDE_PLUGIN_DATA}`
