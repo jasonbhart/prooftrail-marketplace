@@ -1,0 +1,23 @@
+{
+  "name": "prooftrail",
+  "version": "0.1.0",
+  "description": "Supervisory review gate: sends the session's prompt and final output to a hosted review service for advisory feedback.",
+  "author": {
+    "name": "Jason (Domain Methods)"
+  },
+  "userConfig": {
+    "SERVICE_URL": {
+      "type": "string",
+      "title": "Review service URL",
+      "description": "Origin of the review API (e.g. https://api.<your-domain>). Required — the plugin has no default.",
+      "required": true
+    },
+    "API_TOKEN": {
+      "type": "string",
+      "title": "Device token",
+      "description": "Paired device token. Leave blank on the host (run /prooftrail:setup instead); set this only for sandbox surfaces, whose plugin data is wiped per session.",
+      "required": false,
+      "sensitive": true
+    }
+  }
+}
