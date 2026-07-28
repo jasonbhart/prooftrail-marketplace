@@ -6,7 +6,38 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
-const PLUGIN_VERSION = '0.1.0-skeleton';
+// Version reported to the service as `client.plugin_version`.
+//
+// This used to be the frozen literal '0.1.0-skeleton', fully decoupled from the
+// version build-plugin.mjs writes into .claude-plugin/plugin.json from the root
+// package.json. That made the field useless for its ONE stated product purpose:
+// docs/05-surface-architecture.md's exp-05 finding is that the Cowork VM serves
+// STALE plugin code that survives uninstall, and its recorded consequence is
+// "the service MUST detect stale `client.plugin_version` per payload". A constant
+// that never changes can never be detected as stale -- every build, forever,
+// reports the same string.
+//
+// Read from the shipped manifest instead, which is a sibling of scripts/ in the
+// built tree (see PLUGIN.md's output tree). Falls back rather than throwing: this
+// file also runs straight from packages/client/src/ in dev and in tests, where no
+// manifest exists. `-dev` is deliberately distinguishable from a real install.
+function readPluginVersion() {
+  const roots = [
+    process.env.CLAUDE_PLUGIN_ROOT && path.join(process.env.CLAUDE_PLUGIN_ROOT, '.claude-plugin', 'plugin.json'),
+    path.join(__dirname, '..', '.claude-plugin', 'plugin.json'),
+  ].filter(Boolean);
+  for (const p of roots) {
+    try {
+      const v = JSON.parse(fs.readFileSync(p, 'utf8')).version;
+      if (typeof v === 'string' && v) return v;
+    } catch {
+      /* not installed as a plugin, or unreadable -- try the next candidate */
+    }
+  }
+  return '0.0.0-dev';
+}
+
+const PLUGIN_VERSION = readPluginVersion();
 
 /** Read all of stdin, parse JSON tolerantly. Returns {} on any failure. */
 function readStdinJson() {

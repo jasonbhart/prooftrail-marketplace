@@ -1,5 +1,5 @@
 ---
-name: prooftrail-setup
+name: setup
 description: Connect this workspace to the supervisory review service. Use when the user runs /prooftrail:setup, asks to connect/pair/authenticate the prooftrail plugin, or when a review was skipped because the plugin is not connected.
 ---
 
@@ -16,20 +16,23 @@ token never transits chat).
    non-empty, tell the user they're already connected and stop (offer to re-pair only
    if they ask).
 
-2. **Point the user to the dashboard.** The dashboard's address is not
-   derivable from `SERVICE_URL` alone (`SERVICE_URL` is the review API's
-   origin, e.g. `https://api.<your-domain>` — the dashboard may live on a
-   different subdomain, and the naming scheme isn't finalized yet, ADR-005).
-   Do not guess a URL. Instead:
-   - If the user already told you the dashboard address (or it's recorded in
-     this workspace's docs), use that.
-   - Otherwise, ask the user directly: "What's the URL for your review
-     dashboard's setup page?"
+2. **Point the user to the dashboard.** The dashboard's address is not derivable
+   from `SERVICE_URL` (that is the review API's origin; the dashboard is a
+   separate origin). The current dashboard is:
 
-   Once you have it, tell them, verbatim-ish:
-   > Open **<dashboard URL>** in any browser, sign in, and copy the
-   > 8-character setup code. Paste it here.
+   **https://supervisor-dashboard.pages.dev/setup**
+
+   Tell the user, verbatim-ish:
+   > Open **https://supervisor-dashboard.pages.dev/setup** in any browser, sign
+   > in, and copy the 8-character setup code. Paste it here.
+
    The dashboard runs in the user's own browser — no sandbox egress needed for it.
+
+   If that address does not work (self-hosted, or the service has since moved to
+   its own domain), ask the user: "What's the URL for your review dashboard's
+   setup page?" — and use what they give you. Do not invent a different one; in
+   particular do NOT guess a hostname from the product name, as the dashboard
+   origin does not track the product name.
 
    **Prerequisite:** this plugin's `SERVICE_URL` setting must already be
    configured (Settings → Plugins → prooftrail) — it has no built-in default.
