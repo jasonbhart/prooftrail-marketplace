@@ -205,6 +205,33 @@ const MAX_GIT_OUTPUT_BYTES = 20 * 1024 * 1024; // 20 MiB
  * characters parse unambiguously. Read-only: `git status` never touches the
  * index or working tree.
  */
+// Filenames whose CONTENTS must never be attached as evidence. Deliberately a
+// conservative, shape-based denylist rather than content scanning: a false
+// positive costs one unreviewed file, a false negative ships a live credential
+// to a third-party LLM. Applied to untracked files only -- those are inlined in
+// full, whereas a tracked file contributes just its delta.
+//
+// NOT a security boundary. A determined workspace can still name a secret
+// `notes.txt`; C5 says the client is untrusted and this does not change that.
+// It removes the accident, not the attack.
+const SECRET_PATH_RE = new RegExp(
+  [
+    '(^|/)\\.env($|\\.)', // .env, .env.local, .env.production
+    '(^|/)\\.(netrc|npmrc|pypirc|pgpass|htpasswd)$',
+    '(^|/)id_(rsa|dsa|ecdsa|ed25519)$', // ssh private keys
+    '(^|/)\\.(ssh|aws|gnupg|kube|docker)/', // credential directories
+    // whole basename only (+ optional single extension), so `credentials.json`
+    // is withheld while `docs/secrets-design.md` is still reviewed
+    '(^|/)(credentials|secrets?|service-account)(\\.[A-Za-z0-9]+)?$',
+    '\\.(pem|key|p12|pfx|jks|keystore|ppk|asc)$',
+  ].join('|'),
+  'i',
+);
+
+function looksLikeSecretPath(relPath) {
+  return SECRET_PATH_RE.test(relPath);
+}
+
 function listUntrackedFiles(cwd, opts) {
   try {
     const { execFileSync } = require('node:child_process');
@@ -269,7 +296,16 @@ function collectDiff(cwd, maxChars = 200000) {
     // include staged + unstaged; empty output => nothing to attach
     let diff = execFileSync('git', ['diff', 'HEAD'], opts);
 
-    const untracked = listUntrackedFiles(cwd, opts);
+    // Untracked files are included WHOLE (a new file is all-additions), unlike
+    // tracked files which contribute only a delta. That is deliberate -- an agent
+    // that creates new files should have them reviewed -- but it means any
+    // untracked, non-gitignored file's full contents leave the machine, go to a
+    // third-party judge, and are retained for the plan's window (up to 365 days).
+    // Verified: an untracked `.env.local` shipped `OPENAI_API_KEY=...` verbatim.
+    // gitignored files are already excluded (--exclude-standard semantics), which
+    // covers the common case, but "untracked AND not gitignored" is exactly how a
+    // freshly-created credentials file looks. Skip the well-known secret shapes.
+    const untracked = listUntrackedFiles(cwd, opts).filter((p) => !looksLikeSecretPath(p));
     for (const relPath of untracked) {
       const fileDiff = diffUntrackedFile(cwd, relPath, opts);
       if (fileDiff) diff += (diff && !diff.endsWith('\n') ? '\n' : '') + fileDiff;
@@ -548,6 +584,7 @@ module.exports = {
   validateBaseUrl,
   resolveBaseUrl,
   collectDiff,
+  looksLikeSecretPath,
   collectTrace,
   detectSurface,
   resolvePromptId,

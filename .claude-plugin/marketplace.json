@@ -3,6 +3,9 @@
   "owner": {
     "name": "Jason (Domain Methods)"
   },
+  "metadata": {
+    "description": "Prooftrail — external supervisory review for AI coding agents. Advisory verdicts plus an audit trail."
+  },
   "plugins": [
     {
       "name": "prooftrail",
