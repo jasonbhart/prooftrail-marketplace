@@ -60,6 +60,59 @@ function stateDir() {
   return process.env.CLAUDE_PLUGIN_DATA || os.tmpdir();
 }
 
+/**
+ * Guard against writing this plugin's credentials into ANOTHER plugin's data dir.
+ *
+ * Proven live on the first real install (2026-07-28): a Bash-tool invocation --
+ * which is exactly how the setup skill runs pair.js -- inherits a
+ * `CLAUDE_PLUGIN_DATA` belonging to whichever plugin the harness happened to
+ * export, NOT this one. Observed: `.../plugins/data/codex-openai-codex` while
+ * this plugin's dir is `.../plugins/data/prooftrail-inline`, with
+ * `CLAUDE_PLUGIN_ROOT` unset entirely. Following the skill verbatim would have
+ * written a live 90-day token into an unrelated plugin's directory AND reported
+ * success (pair.js confirms via whoami in-process, which cannot tell where the
+ * file landed), while the Stop hook -- which DOES run with the correct env --
+ * read the right path, found nothing, and reported "not connected" forever.
+ * Every retry would have leaked another token.
+ *
+ * Returns null when the directory is acceptable, or an error string when it is
+ * demonstrably another plugin's. Deliberately narrow: it only fires when the path
+ * looks like a plugin data dir (`/plugins/data/<something>`) whose name does not
+ * match this plugin's. A tmpdir, a test fixture, or an explicitly-set custom path
+ * is left alone -- the point is to catch the silent cross-plugin write, not to
+ * police every path.
+ */
+function checkStateDirOwnership(dir = stateDir(), pluginName = readPluginName()) {
+  if (!pluginName) return null;
+  const norm = String(dir).replace(/\\/g, '/');
+  const m = norm.match(/\/plugins\/data\/([^/]+)\/?$/);
+  if (!m) return null; // not a plugin data dir -- tmpdir, test fixture, custom path
+  if (m[1].includes(pluginName)) return null; // ours
+  return (
+    `refusing to write to ${dir} — that is another plugin's data directory ` +
+    `(expected one named for "${pluginName}"). The environment this process ` +
+    `inherited does not belong to this plugin. Re-run with CLAUDE_PLUGIN_DATA ` +
+    `set to this plugin's own data directory.`
+  );
+}
+
+/** This plugin's name from the shipped manifest; null when not running as an install. */
+function readPluginName() {
+  const roots = [
+    process.env.CLAUDE_PLUGIN_ROOT && path.join(process.env.CLAUDE_PLUGIN_ROOT, '.claude-plugin', 'plugin.json'),
+    path.join(__dirname, '..', '.claude-plugin', 'plugin.json'),
+  ].filter(Boolean);
+  for (const p of roots) {
+    try {
+      const n = JSON.parse(fs.readFileSync(p, 'utf8')).name;
+      if (typeof n === 'string' && n) return n;
+    } catch {
+      /* try next */
+    }
+  }
+  return null;
+}
+
 /** Sanitize a session id before using it in a filename (review L2/BUG6). */
 function safeSessionId(sessionId) {
   return String(sessionId || 'unknown').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 128);
@@ -576,6 +629,8 @@ module.exports = {
   PLUGIN_VERSION,
   readStdinJson,
   stateDir,
+  checkStateDirOwnership,
+  readPluginName,
   safeSessionId,
   firstPromptPath,
   findToken,

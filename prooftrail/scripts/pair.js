@@ -8,7 +8,7 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
-const { resolveBaseUrl, detectSurface } = require('./lib');
+const { resolveBaseUrl, detectSurface, checkStateDirOwnership } = require('./lib');
 
 async function main() {
   const code = (process.argv[2] || '').trim();
@@ -42,6 +42,24 @@ async function main() {
     process.stderr.write(
       'Prooftrail: CLAUDE_PLUGIN_DATA is not set — refusing to write the pairing token to a shared temp directory. Re-run from a surface where the plugin data directory is available.\n',
     );
+    process.exitCode = 2;
+    return;
+  }
+
+  // Proven live on the first real install (2026-07-28): pair.js is invoked from
+  // the setup skill via a Bash-tool call, and that process inherits a
+  // CLAUDE_PLUGIN_DATA belonging to whichever plugin the harness exported --
+  // observed pointing at an entirely different plugin, with CLAUDE_PLUGIN_ROOT
+  // unset. The write would land a live 90-day token in that other plugin's
+  // directory and still report success, because the whoami confirmation below
+  // is in-process and cannot see where the file went. Meanwhile the Stop hook,
+  // which runs with the CORRECT env, reads the right path, finds nothing, and
+  // says "not connected" -- so every retry leaks another token.
+  //
+  // Fail closed BEFORE spending the single-use code, same as the check above.
+  const ownershipError = checkStateDirOwnership(dataDir);
+  if (ownershipError) {
+    process.stderr.write(`Prooftrail: ${ownershipError}\n`);
     process.exitCode = 2;
     return;
   }

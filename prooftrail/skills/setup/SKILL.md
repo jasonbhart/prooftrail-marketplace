@@ -42,15 +42,42 @@ token never transits chat).
    that, tell the user to set `SERVICE_URL` in the plugin's settings first,
    then re-run `/prooftrail:setup`.
 
-3. **Exchange the code.** When the user pastes a code like `WXYZ-2345`, run:
+3. **Exchange the code.** When the user pastes a code like `WXYZ-2345`, run
+   **exactly this**, including both environment variables:
+
    ```bash
+   CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" \
+   CLAUDE_PLUGIN_OPTION_SERVICE_URL="${CLAUDE_PLUGIN_OPTION_SERVICE_URL}" \
    node "${CLAUDE_PLUGIN_ROOT}/scripts/pair.js" <CODE>
    ```
-   No env var to set by hand: once installed as a plugin, the `SERVICE_URL`
-   setting is exported to this process automatically as
-   `CLAUDE_PLUGIN_OPTION_SERVICE_URL`, which `pair.js` resolves the same way
-   `review.js` does (env override `REVIEWSVC_URL` first, then the userConfig
-   value). The script exchanges the code, writes the token to
+
+   **Do not drop those env vars, and do not assume the plugin's settings reach
+   this process.** They do not. A Bash tool call does NOT inherit this plugin's
+   hook environment — verified on a real install 2026-07-28, where the ambient
+   `CLAUDE_PLUGIN_DATA` pointed at a *different installed plugin's* data
+   directory and `CLAUDE_PLUGIN_ROOT` was unset entirely. Without the override,
+   `pair.js` would write this plugin's live 90-day token into that other
+   plugin's directory and still print success, while the Stop hook (which runs
+   with the correct environment) looks in the right place, finds nothing, and
+   reports "not connected" forever — so each retry leaks another token. The
+   values above are interpolated from the skill's own context, which is correct;
+   the process environment is not. `pair.js` now also refuses outright if it
+   detects it is about to write into another plugin's directory.
+
+   If it prints `service URL not configured`, the `SERVICE_URL` setting did not
+   reach the process. Ask the user for the review API origin and retry with it
+   supplied explicitly:
+
+   ```bash
+   CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" \
+   REVIEWSVC_URL="<origin the user gave>" \
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/pair.js" <CODE>
+   ```
+
+   A failure here happens *before* any network call, so the setup code is NOT
+   consumed — reuse the same one.
+
+   The script exchanges the code, writes the token to
    `${CLAUDE_PLUGIN_DATA}/auth.json` (mode 0600), and then confirms the pair
    stuck by calling `/auth/whoami` **in-process** — the token never transits
    a subprocess argv (and so never appears in `ps`/`/proc` or shell history).
