@@ -838,6 +838,50 @@ function neutralizeAskWindowLabels(text) {
   return String(text).replace(ASK_WINDOW_LABEL_RE, (_m, inner, tail) => `(${inner})${tail}`);
 }
 
+/** Bounds the rules block so it can never crowd out the actual request. */
+const RULES_BLOCK_MAX_CHARS = 1200;
+
+/**
+ * Prefix the ask window with the user's JUDGMENT-shaped house rules.
+ *
+ * This is the mechanism exp-14/15/16 measured: a rule delivered as plain text
+ * in the ask changes this judge's behaviour — 8 violator stops gained, 0 lost,
+ * McNemar exact **p = 0.0078**, against labels the author did not write. It is
+ * the one claim from that work which survived the whole adversarial corpus.
+ *
+ * **Only non-computable rules are sent.** Anything the local engine can decide
+ * is decided locally and deliberately withheld here: ADR-011's whole point is
+ * that paying a model to compare two integers is what the measurements ruled
+ * out, and sending both would also double-report every violation. So the split
+ * is exact — computable rules never reach the model, judgment rules never reach
+ * the local engine.
+ *
+ * Rules text is repo-controlled (it comes from AGENTS.md/CLAUDE.md, which any
+ * checked-out project can write), so it is NEUTRALIZED exactly like user prompt
+ * text before assembly. Without that, a repo could type `[current request]:`
+ * into its own rules file and launder a real gap — the same attack the ask
+ * window's label neutralization exists to stop, arriving through a new door.
+ * The judge prompt already treats `initial_prompt` as untrusted data, never as
+ * instructions; this keeps that true.
+ *
+ * Returns `window` unchanged when there are no judgment rules to add.
+ */
+function prependHouseRules(window, rules) {
+  if (!window || !Array.isArray(rules) || rules.length === 0) return window;
+  const lines = [];
+  let used = 0;
+  for (const r of rules) {
+    const text = neutralizeAskWindowLabels(String((r && r.text) || '').trim());
+    if (!text) continue;
+    const line = `- ${text}`;
+    if (used + line.length > RULES_BLOCK_MAX_CHARS) break;
+    used += line.length + 1;
+    lines.push(line);
+  }
+  if (lines.length === 0) return window;
+  return `(house rules — the work is not complete unless these hold):\n${lines.join('\n')}\n\n${window}`;
+}
+
 /**
  * Assemble the labeled ask window sent as `initial_prompt`.
  *
@@ -1489,6 +1533,7 @@ module.exports = {
   classifyCommand,
   detectSurface,
   buildAskWindow,
+  prependHouseRules,
   resolvePromptId,
   shouldShowQuotaNotice,
   shouldShowGateOffer,

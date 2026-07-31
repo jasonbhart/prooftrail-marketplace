@@ -17,6 +17,7 @@ const {
   collectTrace,
   detectSurface,
   buildAskWindow,
+  prependHouseRules,
   resolvePromptId,
   shouldShowQuotaNotice,
   shouldShowGateOffer,
@@ -110,8 +111,12 @@ async function main() {
   const parsedTranscript = parseTranscript(evt.transcript_path);
   let localFindings = '';
   let gateOffer = '';
+  // The rules the local engine CANNOT decide. These are the only ones the
+  // judge is asked about -- see prependHouseRules for why the split is exact.
+  let judgmentRules = [];
   try {
     const local = runLocalRules(evt.cwd, parsedTranscript);
+    judgmentRules = (local && local.evaluation && local.evaluation.unchecked) || [];
     localFindings = formatFindings(local && local.evaluation);
     // Only when the engine can check nothing AND not already shown today.
     if (local && local.offers && local.offers.length && shouldShowGateOffer(evt.session_id)) {
@@ -120,6 +125,7 @@ async function main() {
   } catch {
     localFindings = ''; // fail-soft (ADR-004): an advisory check never breaks a session
     gateOffer = '';
+    judgmentRules = [];
   }
 
   const token = findToken();
@@ -173,7 +179,7 @@ async function main() {
     },
     payload: {
       tier: 'minimal',
-      initial_prompt: buildAskWindow(captured),
+      initial_prompt: prependHouseRules(buildAskWindow(captured), judgmentRules),
       final_message: finalMessage.slice(0, 200000),
     },
     client: { plugin_version: PLUGIN_VERSION, platform: process.platform },
