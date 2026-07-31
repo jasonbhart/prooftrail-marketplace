@@ -4,13 +4,13 @@
     "name": "Jason (Domain Methods)"
   },
   "metadata": {
-    "description": "Prooftrail \u2014 a rules gate for AI coding agents. At the end of every turn an independent judge checks whether the agent followed the rules you set: did it finish the work, did it run the tests it claims, did the run happen after the last edit. Advisory \u2014 it never blocks."
+    "description": "Prooftrail — does your AI coding agent follow the rules you set? Checked at the end of every turn, locally and for free."
   },
   "plugins": [
     {
       "name": "prooftrail",
       "source": "./prooftrail",
-      "description": "Prooftrail \u2014 a rules gate for AI coding agents. At the end of every turn an independent judge checks whether the agent followed the rules you set: did it finish the work, did it run the tests it claims, did the run happen after the last edit. Advisory \u2014 it never blocks."
+      "description": "Prooftrail — checks your AI coding agent against the rules you set, at the end of every turn. Reads your AGENTS.md or CLAUDE.md and verifies the rules that can be checked mechanically — did the tests run, did they run after the last edit, did it finish the work. Runs locally with no account needed; add a hosted judge for the rules that need judgment. Advisory: it never blocks."
     }
   ]
 }

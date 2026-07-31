@@ -657,7 +657,26 @@ function traceTarget(name, input) {
  * dropped first so the LAST N survive -- recent actions are what the
  * claims-vs-evidence check is about.
  */
-function collectTrace(transcriptPath, maxChars = 100000) {
+/**
+ * Parse a transcript into ordered tool calls and their error outcomes.
+ *
+ * Factored out of `collectTrace` so the LOCAL rules engine (src/rules.js) can
+ * read the same structure without a second full parse, and -- the reason it
+ * matters -- without the 100-char target cap `collectTrace` applies for
+ * transport. Measured over the archived transcripts, 93.6% of Bash calls
+ * exceed that cap and classifying the capped text loses 71.2% of real
+ * verification signal, so anything evaluating a rule must see the FULL
+ * command. That asymmetry is the entire architectural argument for computing
+ * locally: this data cannot be reconstructed from any payload the service is
+ * permitted to receive.
+ *
+ * Returns `null` on a missing/unreadable transcript or one with no tool calls
+ * -- never throws (F10 fail-soft, same contract as its callers).
+ *
+ * ADR-009: `block.content` (the tool result BODY) is never read here, by
+ * construction rather than by filtering. Only `is_error` is.
+ */
+function parseTranscript(transcriptPath) {
   if (!transcriptPath) return null;
   try {
     const raw = fs.readFileSync(transcriptPath, 'utf8');
@@ -686,14 +705,30 @@ function collectTrace(transcriptPath, maxChars = 100000) {
           if (typeof block.tool_use_id === 'string') {
             outcomes.set(block.tool_use_id, block.is_error === true);
             // NOTE: block.content (the actual result body) is intentionally
-            // never read here -- see the ADR-009 note in this function's doc
-            // comment above.
+            // never read here -- see the ADR-009 note above.
           }
         }
       }
     }
 
     if (toolUses.length === 0) return null;
+    return { toolUses, outcomes };
+  } catch {
+    return null; // missing/unreadable transcript (F10)
+  }
+}
+
+/**
+ * `preParsed` lets a caller that has ALREADY run `parseTranscript` reuse the
+ * result rather than re-reading the transcript. review.js needs the same parse
+ * for the local rules engine, and real transcripts reach 15 MB -- parsing twice
+ * per Stop hook costs ~200ms for nothing. Omitted, this parses as before.
+ */
+function collectTrace(transcriptPath, maxChars = 100000, preParsed) {
+  try {
+    const parsed = preParsed || parseTranscript(transcriptPath);
+    if (!parsed || !Array.isArray(parsed.toolUses) || parsed.toolUses.length === 0) return null;
+    const { toolUses, outcomes } = parsed;
 
     // Verification tag (ALT-1): classified from the FULL command, emitted next
     // to the CAPPED target. The tag has to be produced here because 93.6% of
@@ -1423,6 +1458,7 @@ module.exports = {
   resolveBaseUrl,
   collectDiff,
   looksLikeSecretPath,
+  parseTranscript,
   collectTrace,
   classifyCommand,
   detectSurface,

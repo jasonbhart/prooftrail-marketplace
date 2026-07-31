@@ -1,9 +1,10 @@
 # Prooftrail — plugin marketplace
 
-Claude Code / Cowork marketplace hosting the **Prooftrail** plugin: an external
-supervisory review gate. A `Stop` hook sends the session's initial prompt, final
-message, and optional evidence to a hosted review service, which returns an
-advisory verdict.
+Claude Code / Cowork marketplace hosting the **Prooftrail** plugin: it checks
+whether your AI coding agent followed **the rules you set**, at the end of every
+turn.
+
+There are two halves, and the first one needs nothing from us.
 
 ## Install
 
@@ -11,18 +12,54 @@ advisory verdict.
 /plugin marketplace add jasonbhart/prooftrail-marketplace
 ```
 
-Then install `prooftrail`, set the **`SERVICE_URL`** plugin setting to your review
-API origin, and run `/prooftrail:setup` to pair the device.
+Then install `prooftrail`. **That is enough for local rule checking** — no
+account, no signup, no network. Run `/prooftrail:setup` only if you also want
+the hosted judge.
 
-## What gets sent
+## The local half — free, offline, no account
 
-On each Stop, the plugin sends the session's initial prompt and final message.
-On paid tiers it also attaches evidence:
+Prooftrail reads your `AGENTS.md` or `CLAUDE.md` (following symlinks and
+`@imports`) and checks the rules that can be checked mechanically:
 
-- **A git diff** — staged and unstaged changes to tracked files, **plus the full
-  contents of untracked files** that git does not ignore. That is deliberate: an
-  agent that creates new files should have them reviewed. But it means a new,
-  untracked, non-gitignored file leaves your machine in full.
+| Rule you wrote | What it checks |
+|---|---|
+| "Always run the tests after changing code" | whether a test command actually ran this turn |
+| "All tests must pass" | whether the most recent test run errored |
+| "Run lint / typecheck / build" | same, per category |
+| "Don't claim done until it's verified" | whether verification ran **after** the last code edit |
+| "Never commit without asking" | reports when a commit/push happened — it does not judge whether you approved it |
+
+This runs entirely on your machine. No model is called and nothing is sent
+anywhere. It is fast: ~240 ms on a 15 MB session transcript.
+
+**Rules it cannot check are named, not silently ignored.** "Follow existing
+patterns", "handle errors properly", "stay in scope" — these have no
+deterministic answer, so Prooftrail says so rather than pretending.
+
+**"Unknown" is never reported as a pass.** If no test ran at all, a "tests must
+pass" rule comes back *unknown*, not *satisfied*.
+
+One honest caveat: a command's outcome is the **tool call's** own status. A
+piped command or `... || true` reports success even when the underlying command
+failed. Prooftrail does not claim to catch that — reading command output would
+require sending it, which the design forbids.
+
+## The optional hosted half
+
+`/prooftrail:setup` pairs your device and adds a hosted judge for the rules that
+genuinely need judgment rather than computation — did the work match the ask,
+is every claim in the final message supported by what actually happened.
+
+**What gets sent, if you enable it:**
+
+- **The session's ask and the agent's final message.**
+- **A tool-call trace** — one redacted line per call
+  (`<tool> [category] <target> -> ok|error`). It never contains tool output.
+- **A git diff**, when the working directory is a repo — staged and unstaged
+  changes to tracked files, **plus the full contents of untracked files** that
+  git does not ignore. That is deliberate: an agent that creates new files
+  should have them reviewed. But it means a new, untracked, non-gitignored file
+  leaves your machine in full.
 
   Files whose names match common credential shapes (`.env*`, `*.pem`, `*.key`,
   `id_rsa`, `credentials*`, `secrets.*`, `.aws/`, `.ssh/`, `.npmrc`, …) are
@@ -30,23 +67,24 @@ On paid tiers it also attaches evidence:
   and a secret in an ordinarily-named file will still be sent. If your workspace
   holds sensitive material, do not enable diff evidence.
 
-- **A tool-call trace** — one redacted line per call (`<tool> <target> -> ok|error`).
-  It never contains tool output.
-
-Nothing is sent at all until you set `SERVICE_URL` and pair.
+The payload is judged and discarded. What is kept is the verdict, the findings,
+and a content hash — never your code.
 
 ## Behavior
 
 - **Advisory only.** The hook never blocks. A failure, timeout, unreachable
-  service, or exhausted quota passes straight through and the session continues —
-  every path exits 0. Reviews are a second opinion, not a gate.
-- **`SERVICE_URL` has no default.** The plugin is inert until you set it.
+  service, or exhausted quota passes straight through and the session continues
+  — every path exits 0. Reviews are a second opinion, not a gate.
+- **Local findings survive a service outage.** They needed no network to
+  produce, so losing the network does not lose them.
+- **`SERVICE_URL` ships with a default** pointing at the hosted service.
+  Override it only for a self-hosted deployment.
 - **Sandbox surfaces**: plugin data is wiped per session, so pairing does not
   persist. Set the `API_TOKEN` plugin setting directly instead of running setup
   each session.
 - **Egress**: Cowork sandboxes are default-deny outbound. Allowlist your
-  `SERVICE_URL` host under Settings → Capabilities, or every review fails soft
-  with a network notice.
+  `SERVICE_URL` host under Settings → Capabilities, or hosted reviews fail soft
+  with a network notice. Local rule checking is unaffected.
 
 ## This repo is generated
 

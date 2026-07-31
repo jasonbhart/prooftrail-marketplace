@@ -13,6 +13,7 @@ const {
   sanitizeFeedback,
   resolveBaseUrl,
   collectDiff,
+  parseTranscript,
   collectTrace,
   detectSurface,
   buildAskWindow,
@@ -20,6 +21,7 @@ const {
   shouldShowQuotaNotice,
   idempotencyKey,
 } = require('./lib');
+const { runLocalRules, formatFindings } = require('./rules');
 
 // Client deadline stays BELOW the Stop-hook timeout (60s in hooks.sample.json)
 // so a slow judge fails soft here, never as a raw hook timeout (matrix F2).
@@ -92,9 +94,35 @@ async function main() {
     return;
   }
 
+  // ---- the LOCAL rules pass -------------------------------------------------
+  // Runs before anything network-shaped, and deliberately before the token
+  // check: computable rules need no account, no service and no model, so a
+  // user who has never signed up still gets them. That is not a giveaway --
+  // ADR-001's amendment says a rule that CAN be computed MUST be computed, and
+  // experiments/16 found the two shipped local predicates outscoring the
+  // hosted judge (14/22 vs 12/22) on the same stops and independent labels.
+  // Paying a model to compare two integers it was handed is the thing that
+  // measurement ruled out.
+  //
+  // Parsed once here and handed to collectTrace below -- real transcripts reach
+  // 15 MB and this hook runs on every turn.
+  const parsedTranscript = parseTranscript(evt.transcript_path);
+  let localFindings = '';
+  try {
+    const local = runLocalRules(evt.cwd, parsedTranscript);
+    localFindings = formatFindings(local && local.evaluation);
+  } catch {
+    localFindings = ''; // fail-soft (ADR-004): an advisory check never breaks a session
+  }
+
   const token = findToken();
   if (!token) {
-    emitSystemMessage('Prooftrail: not connected — run /prooftrail:setup to enable reviews.');
+    // Still worth saying: the local half of the product works unauthenticated.
+    emitSystemMessage(
+      localFindings
+        ? `Prooftrail (local rules):\n${localFindings}\n\nNot connected — run /prooftrail:setup to add hosted review.`
+        : 'Prooftrail: not connected — run /prooftrail:setup to enable reviews.',
+    );
     return;
   }
   // T2.2 full (audit-trail tranche, Phase 3; TM-4): CLAUDE_PLUGIN_OPTION_SERVICE_URL
@@ -106,7 +134,17 @@ async function main() {
   const pinNotice = envIgnored
     ? 'Prooftrail: ignoring REVIEWSVC_URL — SERVICE_URL is pinned by plugin config.'
     : null;
-  const withPinNotice = (text) => (pinNotice ? `${pinNotice}\n${text}` : text);
+  // Local findings needed no network to produce, so they must survive EVERY
+  // network failure path below -- a service outage degrading the hosted review
+  // to nothing is expected (F1-F6), silently dropping a rule violation we
+  // already computed on this machine is not.
+  const withPinNotice = (text) => {
+    const parts = [];
+    if (pinNotice) parts.push(pinNotice);
+    if (localFindings) parts.push(`Prooftrail (local rules):\n${localFindings}`);
+    if (text) parts.push(text);
+    return parts.join('\n');
+  };
   if (!baseUrl) {
     // T2.3: don't fail silently — a workspace clearing/spoofing the URL must be visible.
     emitSystemMessage(withPinNotice('Prooftrail: not configured (invalid or missing service URL) — run /prooftrail:setup.'));
@@ -135,7 +173,7 @@ async function main() {
   // unreadable, lagging, or malformed transcript -- F10) is fully absorbed by
   // collectTrace's own fail-soft contract (returns null, never throws), so
   // this degrades silently to the diff/minimal tiers below.
-  const trace = collectTrace(evt.transcript_path);
+  const trace = collectTrace(evt.transcript_path, undefined, parsedTranscript);
   if (trace) {
     body.payload.tier = 'trace';
     body.payload.trace = trace.trace;
@@ -200,6 +238,9 @@ async function main() {
   // how many of these apply.
   const parts = [];
   if (pinNotice) parts.push(pinNotice);
+  // Deterministic findings lead: they are computed, not judged, and on the one
+  // rule with independent labels the local predicates outscored the judge.
+  if (localFindings) parts.push(`Prooftrail (local rules):\n${localFindings}`);
   if (result.verdict === 'revise') {
     // T2.1: bound + strip before injecting.
     const clean = typeof result.feedback === 'string' ? sanitizeFeedback(result.feedback) : '';
