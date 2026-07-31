@@ -152,9 +152,12 @@ and a content hash — never your code.
 
 ## Behavior
 
-- **Advisory only.** The hook never blocks. A failure, timeout, unreachable
-  service, or exhausted quota passes straight through and the session continues
-  — every path exits 0. Reviews are a second opinion, not a gate.
+- **Advisory by default.** Nothing blocks unless you marked a rule `[block]`
+  yourself. A failure, timeout, unreachable service, or exhausted quota passes
+  straight through and the session continues — every path exits 0.
+- **The hosted judge never blocks, at all.** Only your own mechanically-checked
+  rules can, and only the ones you marked. A judged verdict is a second opinion,
+  not a gate.
 - **Local findings survive a service outage.** They needed no network to
   produce, so losing the network does not lose them.
 - **`SERVICE_URL` ships with a default** pointing at the hosted service.
