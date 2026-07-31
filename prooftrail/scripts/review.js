@@ -15,6 +15,7 @@ const {
   collectDiff,
   collectTrace,
   detectSurface,
+  buildAskWindow,
   resolvePromptId,
   shouldShowQuotaNotice,
   idempotencyKey,
@@ -122,7 +123,7 @@ async function main() {
     },
     payload: {
       tier: 'minimal',
-      initial_prompt: String(captured.prompt).slice(0, 100000),
+      initial_prompt: buildAskWindow(captured),
       final_message: finalMessage.slice(0, 200000),
     },
     client: { plugin_version: PLUGIN_VERSION, platform: process.platform },
@@ -139,6 +140,11 @@ async function main() {
     body.payload.tier = 'trace';
     body.payload.trace = trace.trace;
     body.payload.trace_truncated = trace.truncated;
+    // ALT-1: tells the service the trace carries `[category]` verification tags,
+    // so absent tags mean "no verification ran" rather than "this client is too
+    // old to tag". The service refuses to derive attested.verification without
+    // it -- see deriveAttested.
+    body.payload.trace_classified = trace.classified === true;
   }
 
   // T4.1: attach a diff as evidence when cwd is a git repo. Attached

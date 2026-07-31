@@ -1,7 +1,7 @@
 {
   "name": "prooftrail",
-  "version": "0.1.0",
-  "description": "Prooftrail — independent review for AI coding agents. Sends the session's prompt and final output to a hosted judge and returns advisory feedback plus an audit trail. Never blocks.",
+  "version": "0.2.0",
+  "description": "Prooftrail \u2014 a rules gate for AI coding agents. At the end of every turn an independent judge checks whether the agent followed the rules you set: did it finish the work, did it run the tests it claims, did the run happen after the last edit. Advisory \u2014 it never blocks.",
   "author": {
     "name": "Jason (Domain Methods)"
   },
@@ -9,8 +9,8 @@
     "SERVICE_URL": {
       "type": "string",
       "title": "Review service URL",
-      "description": "Origin of the review API (e.g. https://api.<your-domain>). Required — the plugin has no default.",
-      "required": true
+      "description": "Origin of the review API. Defaults to the hosted service; override for self-hosted deployments.",
+      "default": "https://supervisor-api.jason-8e5.workers.dev"
     },
     "API_TOKEN": {
       "type": "string",

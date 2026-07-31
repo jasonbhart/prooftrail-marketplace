@@ -8,7 +8,7 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
-const { resolveBaseUrl, detectSurface, checkStateDirOwnership } = require('./lib');
+const { resolveBaseUrl, detectSurface, checkStateDirOwnership, diagnose } = require('./lib');
 
 async function main() {
   const code = (process.argv[2] || '').trim();
@@ -136,6 +136,21 @@ async function main() {
   // auditing). The token is used here only as a fetch header — it never
   // leaves this process, and is never printed.
   process.stdout.write(`${await checkWhoami(baseUrl, token)}\n`);
+
+  // Static checks only. Liveness is excluded on purpose: the plugin was just
+  // installed mid-session, so its hooks are legitimately not wired yet and a
+  // liveness check here would false-alarm on every first-time install. A
+  // duplicate install, by contrast, is visible on disk regardless of timing --
+  // and pairing is the one moment the user is definitely paying attention.
+  try {
+    const problems = (await diagnose({ static: true })).filter((f) => f.status === 'fail');
+    for (const f of problems) {
+      process.stdout.write(`\nProoftrail: ${f.title}\n${f.detail}\n`);
+      if (f.remedy) process.stdout.write(`→ ${f.remedy}\n`);
+    }
+  } catch {
+    // Fail-soft: pairing succeeded; a diagnostic problem must never mask that.
+  }
 }
 
 /**

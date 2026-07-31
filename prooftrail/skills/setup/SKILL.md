@@ -34,13 +34,11 @@ token never transits chat).
    particular do NOT guess a hostname from the product name, as the dashboard
    origin does not track the product name.
 
-   **Prerequisite:** this plugin's `SERVICE_URL` setting must already be
-   configured (Settings → Plugins → prooftrail) — it has no built-in default.
-   If it is missing, step 3 below will fail before it ever reaches the
-   network, printing `Prooftrail: service URL not configured (set
-   REVIEWSVC_URL, or the SERVICE_URL plugin setting).` on stderr. If you see
-   that, tell the user to set `SERVICE_URL` in the plugin's settings first,
-   then re-run `/prooftrail:setup`.
+   **Service URL:** the plugin ships with the hosted service's URL as a
+   built-in default (since 2026-07-29), so most users configure nothing.
+   Self-hosted deployments override it via the `SERVICE_URL` plugin setting
+   or `REVIEWSVC_URL`. If step 3 prints `service URL not configured`, this is
+   a stripped/self-hosted build — ask the user for their review API origin.
 
 3. **Exchange the code.** When the user pastes a code like `WXYZ-2345`, run
    **exactly this**, including both environment variables:
@@ -95,29 +93,108 @@ token never transits chat).
    If the script exits non-zero instead, relay its stderr (e.g. "request a fresh
    code") — codes are single-use and expire in 10 minutes — and stop.
 
-5. **Tell the user to restart their session — pairing alone does NOT start reviews.**
-   On a successful pair, always finish with:
+5. **Tell the user whether a restart is needed — check, do not assume.**
 
-   > Restart your Claude Code session to activate reviews. Pairing is saved, but
-   > the hooks don't start firing until a session that begins after the install.
+   Claude Code snapshots plugin state at session start (docs/05 bug register,
+   upstream #68020), so a plugin INSTALLED mid-session has its **skill**
+   available immediately — which is how this pairing flow ran at all — while its
+   **hooks are not wired**. Verified 2026-07-28: after a successful pair on a
+   fresh install, the session ended and nothing happened. No captured prompt, no
+   review, no notice. Every visible signal said it was working.
 
-   This is not optional politeness. Claude Code snapshots plugin state at session
-   start (docs/05 bug register, upstream #68020), so a plugin installed mid-session
-   has its **skill** available immediately — which is how this pairing flow ran at
-   all — while its **hooks are not wired**. Verified 2026-07-28 on a real install:
-   after a successful pair, the session ended and *nothing happened*. No captured
-   prompt, no review, no notice. Every visible signal said it was working.
+   But that applies to a fresh INSTALL, not to a fresh PAIRING. The token is
+   read per hook invocation (`findToken()`), not snapshotted — so when hooks are
+   ALREADY firing, pairing takes effect immediately, in this same session.
+   Verified 2026-07-29 in a Cowork sandbox: pairing mid-session produced review
+   rows without any restart.
 
-   That silence is the failure mode to prevent: the user sees the skill appear,
-   pairs, gets `connected as … (free, N/50 reviews)`, and concludes the product is
-   running when it is completely inert. Say the restart line every time.
+   **Check which case this is** — hooks are already firing if a capture file
+   exists for this session:
+
+   ```bash
+   ls "${CLAUDE_PLUGIN_DATA}"/first-prompt-*.json >/dev/null 2>&1 && echo HOOKS-LIVE || echo HOOKS-NOT-WIRED
+   ```
+
+   - `HOOKS-LIVE` → say: *"You're connected and reviews are active now — no
+     restart needed."*
+   - `HOOKS-NOT-WIRED` → say: *"Restart your Claude Code session to activate
+     reviews. Pairing is saved, but the hooks don't start firing until a session
+     that begins after the install."*
+
+   Getting this wrong in either direction is costly. Claiming a restart is
+   needed when it is not sends the user away for no reason; claiming reviews are
+   live when the hooks were never wired recreates the exact silent-inertness
+   failure this product exists to prevent.
+
+## Sandbox surfaces (Cowork local VM and cloud) — pairing is PER-SESSION here
+
+**Check the surface first.** The signals that this session is a Cowork sandbox:
+the hostname is `vm`, `CLAUDE_CODE_ENTRYPOINT` is `remote_cowork`, or
+`${CLAUDE_PLUGIN_DATA}` looks like `/root/.claude/plugins/data/<name>-inline`
+(verified exp-08).
+
+**Pairing works here — but only for this session.** Sandbox plugin data is wiped
+between sessions (exp-05), and claude.ai has no editor for the API_TOKEN setting
+(upstream anthropics/claude-code#39455), so a pairing cannot persist the normal
+way. Egress to the service works (verified 2026-07-29), so proceed with the
+normal code-exchange flow above — and tell the user, plainly and BEFORE they
+fetch a code:
+
+> Pairing will work for this session only — sandbox plugin data is wiped between
+> sessions. You'll need a fresh setup code next session, unless you persist the
+> token in your project (below).
+
+**Persisting across sessions — the workspace token file.** This is the user's
+job on their own machine, NOT something you do from inside the sandbox.
+
+> **NEVER route the token through this conversation.** Do not offer to write,
+> attach, download, upload, display, or otherwise move `auth.json` through the
+> chat — not as a file card, not as an attachment, not as text. ADR-007 exists
+> precisely so the long-lived token never transits the conversation; that is the
+> entire reason pairing uses a disposable single-use code instead. A sandbox has
+> no direct write path to the user's own folders, and the apparent workaround —
+> passing the credential through chat to get it there — is the specific thing
+> the design forbids. If you find yourself reasoning toward it, stop.
+
+**There is no automatic way to persist a sandbox pairing.** Verified 2026-07-29:
+the plugin data dir AND `/mnt/user-data` are both recreated per sandbox — a
+marker planted in one was gone from the next, and a sandbox was observed being
+rebuilt mid-conversation. Nothing the plugin writes inside a sandbox survives.
+
+**And there is no workspace-file route in a cloud sandbox either.** Verified
+2026-07-29 with a Project attached: the environment gains `CLAUDE_PROJECT_UUID`,
+but `/mnt/user-data` holds only an empty `working/` and a filesystem-wide search
+finds no attached content at all. Attached files reach the model through a tool
+channel, never the disk — so nothing the user places in a project folder can be
+read by a hook. Do NOT tell a Cowork user to copy `auth.json` anywhere; it cannot
+work there.
+
+**So for Cowork, say this and stop:**
+
+> Pair each session with a fresh setup code — that is the only thing that works
+> in a Cowork sandbox today. If reviews go quiet mid-session, pair again: the
+> sandbox can be rebuilt underneath a running conversation. Persistent
+> configuration is blocked upstream (anthropics/claude-code#39455).
+
+Also check the service domain is allowlisted (Settings → Capabilities → Domain
+allowlist), or every review fails as unreachable and looks like an outage.
+
+(The `.prooftrail/auth.json` lookup still exists in the client and is correct for
+any surface where a real folder IS mounted — a host machine, or possibly a local
+Cowork VM, which is untested. It is simply not available in a cloud sandbox.)
+
+If they would rather not, per-session pairing is a perfectly good answer: one
+fresh setup code at the start of each session, about thirty seconds. Say so
+plainly rather than pushing persistence — note that each pairing consumes a
+device token, so a user pairing every session will accumulate them.
+
+`/prooftrail:doctor` afterwards confirms the state either way.
 
 ## Notes
 - Tokens are per-surface (host / local-VM / cloud). If the user works across surfaces,
-  each pairs once. Sandbox data dirs are ephemeral (exp-05) — `${CLAUDE_PLUGIN_DATA}`
-  is wiped per session there, so re-pairing on every sandbox session is impractical.
-  For sandbox surfaces, prefer setting the plugin's `API_TOKEN` setting directly
-  (a sensitive userConfig value, keychain-backed and exported as
-  `CLAUDE_PLUGIN_OPTION_API_TOKEN`) instead of running this pairing flow.
+  each pairs once.
 - Never ask the user for the token directly, and never echo it. Only the disposable
   setup code belongs in the conversation.
+- If reviews still do not appear after pairing and a restart, run
+  `/prooftrail:doctor` — it names the cause, including the duplicate-install case
+  that silently strips hooks.
