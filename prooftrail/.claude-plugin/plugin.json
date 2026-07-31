@@ -1,6 +1,6 @@
 {
   "name": "prooftrail",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Prooftrail — checks your AI coding agent against the rules you set, at the end of every turn. Reads your AGENTS.md or CLAUDE.md and verifies the rules that can be checked mechanically — did the tests run, did they run after the last edit, did it finish the work. Runs locally with no account needed; add a hosted judge for the rules that need judgment. Advisory: it never blocks.",
   "author": {
     "name": "Jason (Domain Methods)"

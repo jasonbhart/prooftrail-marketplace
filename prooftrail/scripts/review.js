@@ -19,9 +19,10 @@ const {
   buildAskWindow,
   resolvePromptId,
   shouldShowQuotaNotice,
+  shouldShowGateOffer,
   idempotencyKey,
 } = require('./lib');
-const { runLocalRules, formatFindings } = require('./rules');
+const { runLocalRules, formatFindings, formatOffers } = require('./rules');
 
 // Client deadline stays BELOW the Stop-hook timeout (60s in hooks.sample.json)
 // so a slow judge fails soft here, never as a raw hook timeout (matrix F2).
@@ -108,21 +109,31 @@ async function main() {
   // 15 MB and this hook runs on every turn.
   const parsedTranscript = parseTranscript(evt.transcript_path);
   let localFindings = '';
+  let gateOffer = '';
   try {
     const local = runLocalRules(evt.cwd, parsedTranscript);
     localFindings = formatFindings(local && local.evaluation);
+    // Only when the engine can check nothing AND not already shown today.
+    if (local && local.offers && local.offers.length && shouldShowGateOffer(evt.session_id)) {
+      gateOffer = formatOffers(local.offers, local.sources);
+    }
   } catch {
     localFindings = ''; // fail-soft (ADR-004): an advisory check never breaks a session
+    gateOffer = '';
   }
 
   const token = findToken();
   if (!token) {
     // Still worth saying: the local half of the product works unauthenticated.
-    emitSystemMessage(
-      localFindings
-        ? `Prooftrail (local rules):\n${localFindings}\n\nNot connected — run /prooftrail:setup to add hosted review.`
+    const unauth = [];
+    if (localFindings) unauth.push(`Prooftrail (local rules):\n${localFindings}`);
+    if (gateOffer) unauth.push(gateOffer);
+    unauth.push(
+      localFindings || gateOffer
+        ? 'Not connected — run /prooftrail:setup to add hosted review.'
         : 'Prooftrail: not connected — run /prooftrail:setup to enable reviews.',
     );
+    emitSystemMessage(unauth.join('\n\n'));
     return;
   }
   // T2.2 full (audit-trail tranche, Phase 3; TM-4): CLAUDE_PLUGIN_OPTION_SERVICE_URL
@@ -142,6 +153,7 @@ async function main() {
     const parts = [];
     if (pinNotice) parts.push(pinNotice);
     if (localFindings) parts.push(`Prooftrail (local rules):\n${localFindings}`);
+    if (gateOffer) parts.push(gateOffer);
     if (text) parts.push(text);
     return parts.join('\n');
   };
@@ -241,6 +253,7 @@ async function main() {
   // Deterministic findings lead: they are computed, not judged, and on the one
   // rule with independent labels the local predicates outscored the judge.
   if (localFindings) parts.push(`Prooftrail (local rules):\n${localFindings}`);
+  if (gateOffer) parts.push(gateOffer);
   if (result.verdict === 'revise') {
     // T2.1: bound + strip before injecting.
     const clean = typeof result.feedback === 'string' ? sanitizeFeedback(result.feedback) : '';

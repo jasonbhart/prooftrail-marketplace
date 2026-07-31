@@ -153,6 +153,32 @@ function shouldShowQuotaNotice(sessionId, nowMs = Date.now()) {
   }
 }
 
+function gateOfferMarkerPath(sessionId, nowMs) {
+  return path.join(stateDir(), `gate-offer-${safeSessionId(sessionId)}-${utcDateStr(nowMs)}.json`);
+}
+
+/**
+ * The documented-command offer is capped at once per (session_id, UTC day),
+ * exactly like the quota notice above and for the same reason: the Stop loop
+ * runs on EVERY turn, so anything unthrottled there becomes nagware. The offer
+ * is additionally only produced when the engine can check nothing at all (see
+ * `runLocalRules`), so a user with a working gate never sees it.
+ *
+ * Same atomic mark-and-check via exclusive create, and the same fail-soft
+ * default -- but inverted. Where the quota notice defaults to SHOWING on an fs
+ * error (missing a paid-quota warning is worse than repeating it), an
+ * unsolicited suggestion defaults to STAYING SILENT. Erring toward noise is
+ * only correct when the message is something the user needs.
+ */
+function shouldShowGateOffer(sessionId, nowMs = Date.now()) {
+  try {
+    fs.writeFileSync(gateOfferMarkerPath(sessionId, nowMs), '1', { flag: 'wx' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Credential chain per ADR-007: env -> sensitive userConfig -> data-dir file. */
 function findToken() {
   if (process.env.REVIEWSVC_TOKEN) return process.env.REVIEWSVC_TOKEN;
@@ -1465,6 +1491,7 @@ module.exports = {
   buildAskWindow,
   resolvePromptId,
   shouldShowQuotaNotice,
+  shouldShowGateOffer,
   idempotencyKey,
   pluginRoots,
   diagnose,

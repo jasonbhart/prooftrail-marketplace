@@ -36,6 +36,20 @@ anywhere. It is fast: ~240 ms on a 15 MB session transcript.
 patterns", "handle errors properly", "stay in scope" — these have no
 deterministic answer, so Prooftrail says so rather than pretending.
 
+**No rules written yet? It offers gates from commands you already documented.**
+Most of a real `AGENTS.md` is reference, not rules — across 2,203 public repos,
+35% document a test command and only 23% state it as a rule. If your file has a
+commands section, Prooftrail proposes the exact line to paste:
+
+```
+- Always run `npm test` after changing code.
+```
+
+That offer appears **at most once per session**, and only when nothing is
+checkable yet — if you already have a working gate you will never see it. Run
+**`/prooftrail:rules`** any time for the full picture: what is checked, what is
+not checkable, and every gate available to you.
+
 **"Unknown" is never reported as a pass.** If no test ran at all, a "tests must
 pass" rule comes back *unknown*, not *satisfied*.
 

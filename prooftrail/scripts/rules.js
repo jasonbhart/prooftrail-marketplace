@@ -52,6 +52,7 @@
  */
 const fs = require('node:fs');
 const path = require('node:path');
+const { basename } = path;
 const { classifyCommand } = require('./lib');
 
 /** Categories that CHECK the work, as opposed to performing or shipping it. */
@@ -186,12 +187,71 @@ const RULE_FAMILIES = [
  * converts the 9.3% who authored a gate into the 59.9% who documented a
  * command, using data already in the file, with no new authoring burden.
  */
+/**
+ * A candidate must START as a real invocation before it can be offered.
+ *
+ * A dry-run of the offer over the 2,203-file corpus made this necessary:
+ * roughly half the proposed lines were not commands at all. Matching a bare
+ * category word accepted `test/widget_test.dart`, `types.ts`, `build.gradle`,
+ * `test-definitions/`, `build`, `test:` and even a line of Ruby
+ * (`test "homepage shows TRUG title" do`) lifted out of a fenced example.
+ *
+ * An offer is text we ask the user to paste into their own rules file, so a
+ * wrong one is worse than no offer at all. Requiring a known runner or a known
+ * standalone tool costs a few real commands and removes every one of those.
+ */
+const RUNNER_HEAD =
+  /^(?:npx|npm|pnpm|yarn|bun|bunx|make|just|task|cargo|go|uv|uvx|poetry|rake|mix|dotnet|composer|gradle|\.\/gradlew|mvn|deno|nx|turbo|hatch|pdm|tox|nox|swift|zig|sbt|bazel|python3?|node)\s+\S/i;
+const STANDALONE_HEAD =
+  /^(?:vitest|jest|pytest|mocha|ava|rspec|phpunit|eslint|ruff|flake8|clippy|prettier|biome|tsc|mypy|pyright|golangci-lint|shellcheck|stylelint|rubocop|gofmt)\b/i;
+
+/**
+ * The tool name, when there is one, is AUTHORITATIVE — it beats any verb found
+ * later in the command. `ruff check` is a lint run, not a test run, and a
+ * verb-only scan classifies it as `test` because "check" appears after a space.
+ */
+const TOOL_CATEGORY = new Map([
+  ['vitest', 'test'], ['jest', 'test'], ['pytest', 'test'], ['mocha', 'test'],
+  ['ava', 'test'], ['rspec', 'test'], ['phpunit', 'test'],
+  ['eslint', 'lint'], ['ruff', 'lint'], ['flake8', 'lint'], ['clippy', 'lint'],
+  ['prettier', 'lint'], ['biome', 'lint'], ['rubocop', 'lint'],
+  ['golangci-lint', 'lint'], ['stylelint', 'lint'], ['gofmt', 'lint'],
+  ['tsc', 'typecheck'], ['mypy', 'typecheck'], ['pyright', 'typecheck'],
+]);
+
+/** Verb fallback, MOST specific first — `check` is the weakest signal. */
 const COMMAND_PATTERNS = [
-  ['test', /^(?:[\w./-]*(?:npm|pnpm|yarn|bun|make|just|task|cargo|go|uv|poetry|rake|mix)\s+)?(?:run\s+)?(?:test|tests|check)\b|^(?:npx\s+|uvx\s+)?(?:vitest|jest|pytest|mocha|ava|rspec|phpunit)\b/i],
-  ['lint', /^(?:[\w./-]*(?:npm|pnpm|yarn|bun|make|just|task|cargo)\s+)?(?:run\s+)?(?:lint|format|fmt)\b|^(?:npx\s+)?(?:eslint|ruff|flake8|clippy|prettier|biome)\b/i],
-  ['typecheck', /^(?:[\w./-]*(?:npm|pnpm|yarn|bun|make|just|task)\s+)?(?:run\s+)?(?:typecheck|type-check|types)\b|^(?:npx\s+)?(?:tsc|mypy|pyright)\b/i],
-  ['build', /^(?:[\w./-]*(?:npm|pnpm|yarn|bun|make|just|task|cargo|go)\s+)?(?:run\s+)?build\b/i],
+  ['typecheck', /(?:^|\s)(?:run\s+)?(?:typecheck|type-check|types)(?![\w-])/i],
+  ['lint', /(?:^|\s)(?:run\s+)?(?:lint|format|fmt)(?![\w-])/i],
+  ['build', /(?:^|\s)(?:run\s+)?(?:build|compile)(?![\w-])/i],
+  ['test', /(?:^|\s)(?:run\s+)?(?:test|tests|check)(?![\w-])/i],
 ];
+
+/** Category for one command, or `null` when nothing recognises it. */
+function categoriseCommand(cmd) {
+  const head = /^(?:npx|bunx|uvx)\s+([\w.-]+)|^([\w.-]+)/.exec(cmd);
+  const tool = ((head && (head[1] || head[2])) || '').toLowerCase();
+  if (TOOL_CATEGORY.has(tool)) return TOOL_CATEGORY.get(tool);
+  for (const [category, re] of COMMAND_PATTERNS) {
+    if (re.test(cmd)) return category;
+  }
+  return null;
+}
+
+/**
+ * Strip a trailing prose comment from a documented command.
+ *
+ * Real rules files annotate their command tables — `pnpm build   # Build
+ * (tsup -> dist/)`, `npm test   # 运行 Jest 测试 (386 个用例)` — and offering the
+ * annotation back as part of the command is how a paste-ready line stops being
+ * paste-ready. Only strips a `#` that is clearly a comment (preceded by
+ * whitespace, followed by whitespace or at least two words), never one inside
+ * an argument like `--grep "#tag"`.
+ */
+function stripTrailingComment(cmd) {
+  const m = /\s{2,}#|\s#\s/.exec(cmd);
+  return (m ? cmd.slice(0, m.index) : cmd).trim();
+}
 
 /**
  * Read a rules file, following a symlink and inlining `@imports` one level at
@@ -361,11 +421,14 @@ function extractCommands(text) {
   for (const m of text.matchAll(/`([^`\n]{2,80})`/g)) candidates.push(m[1].trim());
 
   const out = new Map();
-  for (const cmd of candidates) {
-    if (cmd.length > 80) continue;
-    for (const [category, re] of COMMAND_PATTERNS) {
-      if (re.test(cmd) && !out.has(cmd)) out.set(cmd, { category, command: cmd });
-    }
+  for (const raw of candidates) {
+    const cmd = stripTrailingComment(raw);
+    if (cmd.length < 3 || cmd.length > 80) continue;
+    // Must look like an invocation, not a path, a heading or a line of source.
+    if (!RUNNER_HEAD.test(cmd) && !STANDALONE_HEAD.test(cmd)) continue;
+    if (out.has(cmd)) continue;
+    const category = categoriseCommand(cmd);
+    if (category) out.set(cmd, { category, command: cmd });
   }
   return [...out.values()];
 }
@@ -533,6 +596,61 @@ function evaluateRules(rules, facts) {
   return { violations, passes, unknowns, unchecked, reports };
 }
 
+/** The rule family each documented command category would enable. */
+const CATEGORY_RULE = {
+  test: { family: 'tests-ran', verb: 'run' },
+  lint: { family: 'lint-ran', verb: 'run' },
+  typecheck: { family: 'typecheck-ran', verb: 'run' },
+  build: { family: 'build-ran', verb: 'run' },
+};
+
+/**
+ * Gates that could be enabled from commands the user ALREADY documented.
+ *
+ * Research §3, re-measured against this extractor in exp-19: most of a real
+ * rules file is reference, not rules. **35.0% of repos document a test command
+ * and only 22.6% state it as a rule** — and across the four categories, 705 of
+ * 2,203 files (32.0%) document at least one verifying command they never turned
+ * into a gate. Offering those takes the engine from **36.9% to 56.2%** of
+ * repos, a 1.52× expansion, with no new authoring burden: the answer is already
+ * in the user's own file.
+ *
+ * Returns `[{ category, command, family, line }]`, where `line` is the exact
+ * text to paste. Empty when every documented category already has a rule — the
+ * common good case, and the one that must stay silent.
+ */
+function proposeGates(rules, commands) {
+  const have = new Set((rules || []).map((r) => r.family));
+  const out = [];
+  const seen = new Set();
+  for (const c of commands || []) {
+    const spec = CATEGORY_RULE[c.category];
+    if (!spec || have.has(spec.family) || seen.has(c.category)) continue;
+    seen.add(c.category);
+    out.push({
+      category: c.category,
+      command: c.command,
+      family: spec.family,
+      line: `- Always ${spec.verb} \`${c.command}\` after changing code.`,
+    });
+  }
+  return out;
+}
+
+/**
+ * The offer, as text. Deliberately shows the exact line to paste rather than
+ * describing it -- guidance that names an intent without giving the mechanism
+ * gets improvised into something else.
+ */
+function formatOffers(offers, sources) {
+  if (!offers || offers.length === 0) return '';
+  const file = sources && sources.length ? basename(sources[0]) : 'AGENTS.md';
+  const head =
+    `Prooftrail found no rule it can check, but your ${file} documents ` +
+    `${offers.length === 1 ? 'a command' : 'commands'} it could gate on. Add to ${file}:`;
+  return `${head}\n${offers.map((o) => o.line).join('\n')}`;
+}
+
 /**
  * One advisory line per violation, imperative, no preamble — the feedback
  * shape ADR-001 mandates ("cite the specific unmet requirement, one per line").
@@ -553,21 +671,24 @@ function runLocalRules(cwd, parsed) {
     const discovered = discoverRules(cwd);
     if (!discovered) return null;
     const rules = extractRules(discovered.text);
-    if (rules.length === 0) {
-      return {
-        sources: discovered.sources,
-        rules: [],
-        commands: extractCommands(discovered.text),
-        evaluation: { violations: [], passes: [], unknowns: [], unchecked: [], reports: [] },
-      };
-    }
+    const commands = extractCommands(discovered.text);
     const facts = collectFacts(parsed);
+    const evaluation = evaluateRules(rules, facts);
+    // Only offered when the engine can check NOTHING today. A user who already
+    // has a working gate does not need to be told about another one every
+    // turn: the Stop loop is exactly where a helpful suggestion becomes
+    // nagware, and a false block is this product's killing failure mode
+    // (ADR-004) -- an unwanted nag is the same mistake wearing a friendlier
+    // face. `/prooftrail:rules` shows the full list on demand instead.
+    const checkable = rules.filter((r) => r.computable).length;
     return {
       sources: discovered.sources,
       rules,
-      commands: extractCommands(discovered.text),
+      commands,
       facts,
-      evaluation: evaluateRules(rules, facts),
+      evaluation,
+      offers: checkable === 0 ? proposeGates(rules, commands) : [],
+      allOffers: proposeGates(rules, commands),
     };
   } catch {
     return null; // fail-soft: an advisory check never breaks the session
@@ -583,6 +704,8 @@ module.exports = {
   collectFacts,
   decide,
   evaluateRules,
+  proposeGates,
+  formatOffers,
   formatFindings,
   runLocalRules,
 };
