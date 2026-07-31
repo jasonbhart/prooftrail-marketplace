@@ -53,6 +53,13 @@ not checkable, and every gate available to you.
 **"Unknown" is never reported as a pass.** If no test ran at all, a "tests must
 pass" rule comes back *unknown*, not *satisfied*.
 
+One honest limit of this local half: a command's outcome is the **tool call's**
+own status. A piped command or one ending in `... || true` reports success even
+when it failed underneath, and the rules engine cannot see that — reading
+command output would mean sending it, which the design forbids. The optional
+deep check below is how that gets caught, by running the command itself instead
+of reading a claim about it.
+
 ## Optional: deep claim checks with an agent you already have
 
 Some claims leave **no trace at all**. *"I added error handling to X."* *"This is
@@ -93,11 +100,6 @@ Honest limits: it is an LLM, so it is advisory like everything else here and it
 never blocks. It is told to answer UNVERIFIABLE rather than guess, and when a
 claim checks out it says nothing at all. If your agent CLI is not logged in it
 will say so rather than quietly doing nothing.
-
-One honest caveat: a command's outcome is the **tool call's** own status. A
-piped command or `... || true` reports success even when the underlying command
-failed. Prooftrail does not claim to catch that — reading command output would
-require sending it, which the design forbids.
 
 ## The optional hosted half
 
