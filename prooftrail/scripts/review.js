@@ -23,7 +23,14 @@ const {
   shouldShowGateOffer,
   idempotencyKey,
 } = require('./lib');
-const { runLocalRules, formatFindings, formatOffers } = require('./rules');
+const { runLocalRules, collectFacts, formatFindings, formatOffers } = require('./rules');
+const {
+  RECURSION_ENV,
+  detectUncorroboratedClaims,
+  startJob,
+  collectJob,
+  formatJob,
+} = require('./delegate');
 
 // Client deadline stays BELOW the Stop-hook timeout (60s in hooks.sample.json)
 // so a slow judge fails soft here, never as a raw hook timeout (matrix F2).
@@ -68,6 +75,12 @@ async function reportBypass(evt, promptId, reason) {
 }
 
 async function main() {
+  // RECURSION GUARD, first statement in the hook. A delegated local agent
+  // inherits this environment, and if it is itself a Claude Code CLI it loads
+  // this plugin and fires its own Stop hook -- which would spawn another agent,
+  // which would spawn another. Nothing below this line may run in that child.
+  if (process.env[RECURSION_ENV]) return;
+
   const evt = await readStdinJson();
   const finalMessage = evt.last_assistant_message;
   if (!evt.session_id || typeof finalMessage !== 'string') return; // tolerant parse (exp-01/03)
@@ -114,6 +127,10 @@ async function main() {
   // The rules the local engine CANNOT decide. These are the only ones the
   // judge is asked about -- see prependHouseRules for why the split is exact.
   let judgmentRules = [];
+  // Computed from the transcript DIRECTLY, not via runLocalRules -- that
+  // returns null when the project has no rules file, and a false "tests pass"
+  // is worth checking whether or not anyone wrote a rule about tests.
+  const localFacts = collectFacts(parsedTranscript);
   try {
     const local = runLocalRules(evt.cwd, parsedTranscript);
     judgmentRules = (local && local.evaluation && local.evaluation.unchecked) || [];
@@ -128,14 +145,28 @@ async function main() {
     judgmentRules = [];
   }
 
+  // ---- the optional LOCAL AGENT pass (ADR-012) ------------------------------
+  // Detached and reported a turn late, so it adds one `spawn` to this turn and
+  // nothing else. Collect BEFORE starting, so a finished answer is surfaced
+  // rather than replaced by a fresh job.
+  let agentFinding = '';
+  try {
+    agentFinding = formatJob(collectJob(evt.session_id));
+    const claims = detectUncorroboratedClaims(finalMessage, localFacts);
+    if (claims.length) startJob(evt.session_id, evt.cwd, claims, localFacts);
+  } catch {
+    agentFinding = ''; // fail-soft: an optional deep check never breaks a session
+  }
+
   const token = findToken();
   if (!token) {
     // Still worth saying: the local half of the product works unauthenticated.
     const unauth = [];
     if (localFindings) unauth.push(`Prooftrail (local rules):\n${localFindings}`);
+    if (agentFinding) unauth.push(agentFinding);
     if (gateOffer) unauth.push(gateOffer);
     unauth.push(
-      localFindings || gateOffer
+      localFindings || gateOffer || agentFinding
         ? 'Not connected — run /prooftrail:setup to add hosted review.'
         : 'Prooftrail: not connected — run /prooftrail:setup to enable reviews.',
     );
@@ -159,6 +190,7 @@ async function main() {
     const parts = [];
     if (pinNotice) parts.push(pinNotice);
     if (localFindings) parts.push(`Prooftrail (local rules):\n${localFindings}`);
+    if (agentFinding) parts.push(agentFinding);
     if (gateOffer) parts.push(gateOffer);
     if (text) parts.push(text);
     return parts.join('\n');
@@ -259,6 +291,7 @@ async function main() {
   // Deterministic findings lead: they are computed, not judged, and on the one
   // rule with independent labels the local predicates outscored the judge.
   if (localFindings) parts.push(`Prooftrail (local rules):\n${localFindings}`);
+  if (agentFinding) parts.push(agentFinding);
   if (gateOffer) parts.push(gateOffer);
   if (result.verdict === 'revise') {
     // T2.1: bound + strip before injecting.

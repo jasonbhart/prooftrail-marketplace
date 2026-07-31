@@ -53,6 +53,41 @@ not checkable, and every gate available to you.
 **"Unknown" is never reported as a pass.** If no test ran at all, a "tests must
 pass" rule comes back *unknown*, not *satisfied*.
 
+## Optional: deep claim checks with an agent you already have
+
+Some claims leave **no trace at all**. *"I added error handling to X."* *"This is
+backwards compatible."* *"I refactored Y to use Z."* Nothing in a session trace
+can confirm or deny those — and a command ending in `|| true` reports success
+even when it failed underneath.
+
+If you have `codex`, `agy`, `gemini` or `opencode` installed, set the
+**`LOCAL_AGENT`** plugin setting to `auto` (or name one). When a final message
+claims something the trace cannot support, Prooftrail asks that CLI to check it
+against your actual repository:
+
+```
+Prooftrail (agy, last turn): a claim did NOT hold up.
+  claim: "I added a guard so a discount over 100% cannot produce a negative
+          total, and all tests pass."
+  FALSE. billing.js contains no guard preventing a discount over 100% from
+  producing a negative total — line 3 simply returns total - total * (pct/100).
+```
+
+- **Off unless you set it.** It spends your model quota, so it is never a default.
+- **Read-only.** Pinned by the CLI's own sandbox flag, not just by asking nicely.
+  It cannot edit, create, delete or commit anything.
+- **Runs in the background.** Your turn is never slowed; the answer arrives on
+  the next one.
+- **Only when there is a real question** — a claim of verification the session
+  cannot back up.
+- **Nothing leaves your machine.** Your repository is read in place by a tool you
+  already trust, on your own credentials.
+
+Honest limits: it is an LLM, so it is advisory like everything else here and it
+never blocks. It is told to answer UNVERIFIABLE rather than guess, and when a
+claim checks out it says nothing at all. If your agent CLI is not logged in it
+will say so rather than quietly doing nothing.
+
 One honest caveat: a command's outcome is the **tool call's** own status. A
 piped command or `... || true` reports success even when the underlying command
 failed. Prooftrail does not claim to catch that — reading command output would
