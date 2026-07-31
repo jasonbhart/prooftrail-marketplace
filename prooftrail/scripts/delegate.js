@@ -236,6 +236,25 @@ function buildPrompt(claims, facts) {
     .join('\n');
 }
 
+/** Wall-clock ceiling for one delegated review, and the SIGTERM grace after. */
+const JOB_TIMEOUT_S = Number(process.env.PROOFTRAIL_AGENT_TIMEOUT_S || 600);
+const JOB_KILL_AFTER_S = Number(process.env.PROOFTRAIL_AGENT_KILL_AFTER_S || 30);
+
+/**
+ * `[cmd, argv]` wrapped in coreutils `timeout` when it exists, else unchanged.
+ *
+ * Degrading to "no timeout" is deliberate rather than refusing to run: the
+ * check is advisory, and a platform without `timeout` should still get it.
+ * The cost of that degradation is a possible orphan, which is why the
+ * `NO_OUTPUT` state reports elapsed time — a job that ran for the full ceiling
+ * and produced nothing reads very differently from one that died instantly.
+ */
+function wrapWithTimeout(bin, argv, env = process.env) {
+  const t = which('timeout', env);
+  if (!t) return [bin, argv];
+  return [t, [`--kill-after=${JOB_KILL_AFTER_S}`, String(JOB_TIMEOUT_S), bin, ...argv]];
+}
+
 const jobPath = (sessionId) => path.join(stateDir(), `delegate-${safeSessionId(sessionId)}.json`);
 const outPath = (sessionId) => path.join(stateDir(), `delegate-${safeSessionId(sessionId)}.out`);
 
@@ -285,7 +304,19 @@ function startJob(sessionId, cwd, claims, facts, env = process.env) {
       fd = fs.openSync(out, 'w');
       stdio = ['ignore', fd, 'ignore'];
     }
-    const child = spawn(agent.path, agent.argv(prompt, out), {
+
+    // WRAPPED IN `timeout` WHEN AVAILABLE. Detaching and `unref`-ing means
+    // nothing here is watching the child, so an agent CLI that hangs -- waiting
+    // on a prompt, a dead network, a wedged sandbox -- leaks a process that
+    // lives past the session, forever. JOB_MAX_AGE_MS only abandons our RECORD
+    // of it; it cannot reap the process.
+    //
+    // Borrowed from agy-code-review.sh, which pairs `--kill-after` with the
+    // timeout so a child ignoring SIGTERM is still killed, and treats
+    // 124/137/143 as distinct signals. The grace period matters: an agent
+    // mid-write should get the chance to flush rather than lose its answer.
+    const [cmd, argv] = wrapWithTimeout(agent.path, agent.argv(prompt, out), env);
+    const child = spawn(cmd, argv, {
       cwd: cwd || process.cwd(),
       env: { ...env, [RECURSION_ENV]: '1' },
       detached: true,
@@ -340,18 +371,52 @@ function collectJob(sessionId) {
   // exact shape of the bug that produced 15/15 false flags here, where "a
   // review judged on nothing looked identical to one that never had anything".
   // The user needs to know their local agent is not actually running.
-  if (!text) return { agent: meta.agent, claim: meta.claim, verdict: 'NO_OUTPUT', body: '' };
+  // Elapsed time separates the two very different causes: a job that died in
+  // seconds is almost always auth or config, while one that burned the whole
+  // ceiling hit the timeout. agy-code-review.sh makes the same distinction by
+  // treating exit 124/137/143 separately from any other failure.
+  if (!text) {
+    const elapsed_s = Math.round((Date.now() - (meta.started || Date.now())) / 1000);
+    return { agent: meta.agent, claim: meta.claim, verdict: 'NO_OUTPUT', body: '', elapsed_s };
+  }
 
   // Keep only the verdict line and its evidence. An agentic CLI can emit
   // banners, token counts and ANSI colour; injecting that into a session is
   // noise at best.
-  const verdictLine = text.split('\n').find((l) => /\b(TRUE|FALSE|UNVERIFIABLE)\b/.test(l));
-  const body = (verdictLine ? text.slice(text.indexOf(verdictLine)) : text)
+  //
+  // THE VERDICT IS READ FROM THE START OF A LINE, NEVER SCANNED FOR.
+  //
+  // Scanning the body for `FALSE` reported a TRUE verdict as FALSE whenever the
+  // evidence sentence happened to contain the word: "No FALSE negatives were
+  // found in the tests" flipped a correct claim into "did NOT hold up" -- an
+  // accusation against work that was fine, which is this product's worst
+  // failure mode (ADR-004). The prompt mandates that the answer START with one
+  // token precisely so this can be anchored rather than searched.
+  //
+  // Found by reading Jason's own agy-code-review.sh, which carries the SAME
+  // defect at its decision parse (`grep -qi "NEEDS_REVISION"` across the whole
+  // review, so a review saying "not enough to warrant NEEDS_REVISION" blocks
+  // anyway). It is also the exact failure his own rule warns about: never gate
+  // on whether output merely CONTAINS a keyword.
+  const lines = text
     // eslint-disable-next-line no-control-regex
-    .replace(/\[[0-9;]*m/g, '')
-    .trim()
-    .slice(0, 700);
-  const verdict = /\bFALSE\b/.test(body) ? 'FALSE' : /\bTRUE\b/.test(body) ? 'TRUE' : 'UNVERIFIABLE';
+    .replace(/?\[[0-9;]*m/g, '')
+    .split('\n')
+    .map((l) => l.trim());
+  const VERDICT_HEAD = /^[*_`>\s-]*(TRUE|FALSE|UNVERIFIABLE)\b/i;
+  const idx = lines.findIndex((l) => VERDICT_HEAD.test(l));
+  if (idx === -1) {
+    // It answered, but not in the shape asked for. That is UNKNOWN, not a
+    // refutation -- guessing is how a false accusation reaches the user.
+    return {
+      agent: meta.agent,
+      claim: meta.claim,
+      verdict: 'UNVERIFIABLE',
+      body: lines.filter(Boolean).join('\n').trim().slice(0, 700),
+    };
+  }
+  const verdict = VERDICT_HEAD.exec(lines[idx])[1].toUpperCase();
+  const body = lines.slice(idx).filter(Boolean).join('\n').trim().slice(0, 700);
   return { agent: meta.agent, claim: meta.claim, verdict, body };
 }
 
@@ -364,11 +429,13 @@ function collectJob(sessionId) {
 function formatJob(result) {
   if (!result || result.verdict === 'TRUE') return '';
   if (result.verdict === 'NO_OUTPUT') {
-    return (
-      `Prooftrail: the local agent (${result.agent}) produced no output, so deep claim checks are ` +
-      `NOT running. Most often this is an expired login — try running \`${result.agent}\` once ` +
-      `yourself to confirm it works.`
-    );
+    const s = Number(result.elapsed_s) || 0;
+    const cause =
+      s >= JOB_TIMEOUT_S - JOB_KILL_AFTER_S
+        ? `It ran for ${s}s and hit the ${JOB_TIMEOUT_S}s limit, so the check was too large or the agent stalled.`
+        : `It exited after ${s}s, which usually means an expired login or a config problem — ` +
+          `try running \`${result.agent}\` once yourself to confirm it works.`;
+    return `Prooftrail: the local agent (${result.agent}) produced no output, so deep claim checks are NOT running. ${cause}`;
   }
   const head =
     result.verdict === 'FALSE'
@@ -381,6 +448,7 @@ module.exports = {
   ADAPTERS,
   RECURSION_ENV,
   which,
+  wrapWithTimeout,
   detectAgent,
   findClaimSentence,
   detectUncorroboratedClaims,
