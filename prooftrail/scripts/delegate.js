@@ -88,19 +88,27 @@ const ADAPTERS = [
     outputMode: 'stdout',
     argv: (prompt) => ['--sandbox', '--print', prompt],
   },
-  {
-    name: 'gemini',
-    bin: 'gemini',
-    outputMode: 'stdout',
-    argv: (prompt) => ['--prompt', prompt],
-  },
-  {
-    name: 'opencode',
-    bin: 'opencode',
-    outputMode: 'stdout',
-    argv: (prompt) => ['run', prompt],
-  },
 ];
+
+/**
+ * Two CLIs deliberately do NOT have adapters, and both exclusions are decisions
+ * rather than gaps.
+ *
+ * **`opencode`** offers no read-only policy. Checked against `opencode run
+ * --help` on 2026-07-31: the only permission flag is
+ * `--dangerously-skip-permissions`, and the default prompts for approval —
+ * which in a detached job with no TTY hangs instead of answering. Supporting it
+ * would mean either breaking the read-only decision or shipping something that
+ * silently never returns. (`--agent <name>` could point at a user-defined
+ * read-only agent, but that is configuration we neither control nor can verify.)
+ *
+ * **`gemini`** is end-of-life (Jason, 2026-07-31); `agy` is what to use instead.
+ * A `--approval-mode plan` adapter for it was written and then removed unrun —
+ * shipping an adapter for a dead CLI is a maintenance cost with no user.
+ *
+ * The rule this leaves behind: an adapter ships only when it can be pinned
+ * read-only in the argv AND has been run end to end. Both below have been.
+ */
 
 /**
  * `PATH` lookup with no shell, so a path with spaces cannot become an exec.

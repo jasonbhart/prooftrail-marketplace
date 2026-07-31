@@ -60,7 +60,7 @@ backwards compatible."* *"I refactored Y to use Z."* Nothing in a session trace
 can confirm or deny those — and a command ending in `|| true` reports success
 even when it failed underneath.
 
-If you have `codex`, `agy`, `gemini` or `opencode` installed, set the
+If you have `codex` or `agy` installed, set the
 **`LOCAL_AGENT`** plugin setting to `auto` (or name one). When a final message
 claims something the trace cannot support, Prooftrail asks that CLI to check it
 against your actual repository:
@@ -82,6 +82,12 @@ Prooftrail (agy, last turn): a claim did NOT hold up.
   cannot back up.
 - **Nothing leaves your machine.** Your repository is read in place by a tool you
   already trust, on your own credentials.
+
+Only `codex` and `agy` are supported, and both were run end to end before
+shipping. `opencode` is deliberately excluded — it has no read-only mode, only
+`--dangerously-skip-permissions` or a default that would sit waiting for
+approval in a background job. An adapter ships here only if it can be pinned
+read-only and has actually been run.
 
 Honest limits: it is an LLM, so it is advisory like everything else here and it
 never blocks. It is told to answer UNVERIFIABLE rather than guess, and when a
