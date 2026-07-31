@@ -10,6 +10,7 @@ const {
   firstPromptPath,
   findToken,
   emitSystemMessage,
+  emitHookOutput,
   sanitizeFeedback,
   resolveBaseUrl,
   collectDiff,
@@ -23,7 +24,7 @@ const {
   shouldShowGateOffer,
   idempotencyKey,
 } = require('./lib');
-const { runLocalRules, collectFacts, formatFindings, formatOffers } = require('./rules');
+const { runLocalRules, collectFacts, routeFindings, formatViolations, formatOffers } = require('./rules');
 const {
   RECURSION_ENV,
   detectUncorroboratedClaims,
@@ -122,7 +123,9 @@ async function main() {
   // Parsed once here and handed to collectTrace below -- real transcripts reach
   // 15 MB and this hook runs on every turn.
   const parsedTranscript = parseTranscript(evt.transcript_path);
-  let localFindings = '';
+  let localFindings = '';   // notify-level: the user only
+  let localForModel = '';   // inform-level: additionalContext
+  let blockReason = '';     // block-level: decision:"block"
   let gateOffer = '';
   // The rules the local engine CANNOT decide. These are the only ones the
   // judge is asked about -- see prependHouseRules for why the split is exact.
@@ -134,13 +137,40 @@ async function main() {
   try {
     const local = runLocalRules(evt.cwd, parsedTranscript);
     judgmentRules = (local && local.evaluation && local.evaluation.unchecked) || [];
-    localFindings = formatFindings(local && local.evaluation);
+
+    // Each violation travels on the channel its own rule asked for. Default is
+    // `inform` -- the model sees it, the turn still ends. A rules gate whose
+    // findings only ever reached the user was a reporting tool, not a gate.
+    const routed = routeFindings(local && local.evaluation, local && local.commands, finalMessage);
+    localFindings = formatViolations(routed.notifying);
+    localForModel = formatViolations(routed.informing);
+
+    // BLOCKING IS THE GUARDED PATH, and both guards are load-bearing.
+    //
+    // `stop_hook_active` is true when this Stop fired BECAUSE a previous block
+    // refused to let the turn end. Blocking again on the same unmet condition
+    // is how a hook loops until the session quota is gone --
+    // anthropics/claude-code#55754 records exactly that, ~50 minutes and a full
+    // session. So we block at most once, then step aside and let the finding
+    // travel as context instead.
+    //
+    // routeFindings applies the second guard: a rule is only promoted to
+    // `block` when the agent could plausibly satisfy it (see canRemedy).
+    if (routed.blocking.length) {
+      if (evt.stop_hook_active) {
+        localForModel = [localForModel, formatViolations(routed.blocking)].filter(Boolean).join('\n');
+      } else {
+        blockReason = formatViolations(routed.blocking);
+      }
+    }
     // Only when the engine can check nothing AND not already shown today.
     if (local && local.offers && local.offers.length && shouldShowGateOffer(evt.session_id)) {
       gateOffer = formatOffers(local.offers, local.sources);
     }
   } catch {
     localFindings = ''; // fail-soft (ADR-004): an advisory check never breaks a session
+    localForModel = '';
+    blockReason = '';
     gateOffer = '';
     judgmentRules = [];
   }
@@ -166,11 +196,15 @@ async function main() {
     if (agentFinding) unauth.push(agentFinding);
     if (gateOffer) unauth.push(gateOffer);
     unauth.push(
-      localFindings || gateOffer || agentFinding
+      localFindings || gateOffer || agentFinding || localForModel || blockReason
         ? 'Not connected — run /prooftrail:setup to add hosted review.'
         : 'Prooftrail: not connected — run /prooftrail:setup to enable reviews.',
     );
-    emitSystemMessage(unauth.join('\n\n'));
+    emitHookOutput({
+      systemMessage: unauth.join('\n\n'),
+      additionalContext: localForModel ? `Prooftrail (your rules):\n${localForModel}` : '',
+      blockReason: blockReason ? `Prooftrail (your rules):\n${blockReason}` : '',
+    });
     return;
   }
   // T2.2 full (audit-trail tranche, Phase 3; TM-4): CLAUDE_PLUGIN_OPTION_SERVICE_URL
@@ -186,18 +220,26 @@ async function main() {
   // network failure path below -- a service outage degrading the hosted review
   // to nothing is expected (F1-F6), silently dropping a rule violation we
   // already computed on this machine is not.
-  const withPinNotice = (text) => {
+  //
+  // `degrade()` emits ALL THREE channels, not just the user-facing one: an
+  // outage must not silently cost the AGENT a finding that needed no network to
+  // compute. Returning early after only a systemMessage was that exact bug.
+  const degrade = (text) => {
     const parts = [];
     if (pinNotice) parts.push(pinNotice);
     if (localFindings) parts.push(`Prooftrail (local rules):\n${localFindings}`);
     if (agentFinding) parts.push(agentFinding);
     if (gateOffer) parts.push(gateOffer);
     if (text) parts.push(text);
-    return parts.join('\n');
+    emitHookOutput({
+      systemMessage: parts.join('\n'),
+      additionalContext: localForModel ? `Prooftrail (your rules):\n${localForModel}` : '',
+      blockReason: blockReason ? `Prooftrail (your rules):\n${blockReason}` : '',
+    });
   };
   if (!baseUrl) {
     // T2.3: don't fail silently — a workspace clearing/spoofing the URL must be visible.
-    emitSystemMessage(withPinNotice('Prooftrail: not configured (invalid or missing service URL) — run /prooftrail:setup.'));
+    degrade(('Prooftrail: not configured (invalid or missing service URL) — run /prooftrail:setup.'));
     return;
   }
 
@@ -260,7 +302,7 @@ async function main() {
       signal: AbortSignal.timeout(DEADLINE_MS),
     });
   } catch {
-    emitSystemMessage(withPinNotice('Prooftrail: Review skipped — service unreachable (check network/egress allowlist).')); // F1/F2
+    degrade(('Prooftrail: Review skipped — service unreachable (check network/egress allowlist).')); // F1/F2
     return;
   }
 
@@ -271,7 +313,7 @@ async function main() {
       const b = await res.json();
       if (b && typeof b.hint === 'string') hint = ` — ${sanitizeFeedback(b.hint)}`;
     } catch {}
-    emitSystemMessage(withPinNotice(`Prooftrail: Review skipped — service error (${res.status})${hint}.`)); // F3/F4/F6
+    degrade((`Prooftrail: Review skipped — service error (${res.status})${hint}.`)); // F3/F4/F6
     return;
   }
 
@@ -279,7 +321,7 @@ async function main() {
   try {
     result = await res.json();
   } catch {
-    emitSystemMessage(withPinNotice('Prooftrail: Review skipped — malformed service response.')); // F6
+    degrade(('Prooftrail: Review skipped — malformed service response.')); // F6
     return;
   }
 
@@ -314,7 +356,11 @@ async function main() {
   if (typeof notice === 'string' && notice.trim() && shouldShowQuotaNotice(evt.session_id)) {
     parts.push(sanitizeFeedback(notice));
   }
-  if (parts.length) emitSystemMessage(parts.join('\n'));
+  emitHookOutput({
+    systemMessage: parts.join('\n'),
+    additionalContext: localForModel ? `Prooftrail (your rules):\n${localForModel}` : '',
+    blockReason: blockReason ? `Prooftrail (your rules):\n${blockReason}` : '',
+  });
   // approve with no notice -> silent
 }
 

@@ -235,6 +235,43 @@ function emitSystemMessage(text) {
 }
 
 /**
+ * Write the hook's single JSON object, routing each part to the audience that
+ * can actually act on it.
+ *
+ * The three channels are NOT interchangeable, and conflating them is why
+ * findings went nowhere until 2026-07-31:
+ *
+ * - `systemMessage` — **the user only.** Documented as "Warning message shown
+ *   to the user". Everything this plugin emitted went here, so the agent never
+ *   learned it had broken a rule; the human had to relay it.
+ * - `hookSpecificOutput.additionalContext` — **the model**, without an error
+ *   label and without preventing the turn from ending. The binary's own schema
+ *   calls this "the sanctioned feedback channel", kept separate from
+ *   `hook_errors` precisely so it is not read as a failure.
+ * - `decision: "block"` + `reason` — **the model**, and the turn cannot end.
+ *   Powerful and dangerous: anthropics/claude-code#55754 records a blocking
+ *   Stop hook running ~50 minutes and consuming an entire session quota because
+ *   the agent structurally could not satisfy it. Callers must gate this.
+ *
+ * Exactly one object is written, because the hook protocol is one JSON object
+ * per invocation — two writes produce a parse error, not two messages.
+ */
+function emitHookOutput({ systemMessage, additionalContext, blockReason } = {}) {
+  const out = {};
+  if (systemMessage) out.systemMessage = systemMessage;
+  if (additionalContext) {
+    out.hookSpecificOutput = { hookEventName: 'Stop', additionalContext };
+  }
+  if (blockReason) {
+    out.decision = 'block';
+    out.reason = blockReason;
+  }
+  if (Object.keys(out).length === 0) return false;
+  process.stdout.write(JSON.stringify(out));
+  return true;
+}
+
+/**
  * Sanitize judge feedback before it is injected into the user's session (TM-1).
  * The judge/service is a prompt-injection channel; a compromised or MITM'd
  * response must not deliver arbitrary content. Drop control chars (keep tab and
@@ -1523,6 +1560,7 @@ module.exports = {
   firstPromptPath,
   findToken,
   emitSystemMessage,
+  emitHookOutput,
   sanitizeFeedback,
   validateBaseUrl,
   resolveBaseUrl,

@@ -378,6 +378,38 @@ function stripFences(text) {
  */
 const DIRECTIVE = /\b(?:must|should|always|never|do not|don'?t|ensure|make sure|required?|need to|before|after|no\b)\b|^\s*[-*]\s|^\s*\d+\.\s/i;
 
+/**
+ * Per-rule enforcement, written by the user as a trailing marker:
+ *
+ *   - Always run tests after changing code. [block]
+ *   - Run lint before opening a PR. [notify]
+ *
+ * Three levels, because the three hook channels reach different audiences and
+ * carry very different risk:
+ *
+ * - `inform` (DEFAULT) — `hookSpecificOutput.additionalContext`. The model sees
+ *   it and can act; the turn still ends. No loop is possible.
+ * - `block` — `decision:"block"`. The model sees it and the turn CANNOT end.
+ *   Opt-in per rule, never a default: anthropics/claude-code#55754 records a
+ *   blocking Stop hook burning ~50 minutes and a whole session quota because the
+ *   agent could not satisfy it. `review.js` additionally refuses to block when
+ *   `stop_hook_active` is set, and when the violation has no available remedy.
+ * - `notify` — `systemMessage`, the user only. What every finding used to be,
+ *   kept for rules a user wants to watch without steering the agent.
+ *
+ * Defaulting to `inform` rather than `notify` is the deliberate change: a rules
+ * gate whose findings never reach the agent is only a reporting tool.
+ */
+const ENFORCEMENT_MARKER = /[[(](block|blocking|inform|notify|warn)[\])]\s*$/i;
+const ENFORCEMENT_ALIAS = { blocking: 'block', warn: 'notify' };
+
+function parseEnforcement(line) {
+  const m = ENFORCEMENT_MARKER.exec(String(line).trim());
+  if (!m) return 'inform';
+  const raw = m[1].toLowerCase();
+  return ENFORCEMENT_ALIAS[raw] || raw;
+}
+
 function extractRules(text) {
   if (!text || typeof text !== 'string') return [];
   const found = new Map();
@@ -392,7 +424,12 @@ function extractRules(text) {
           family: f.family,
           label: f.label,
           computable: f.computable,
-          text: line.replace(/^\s*(?:[-*]|\d+\.)\s*/, '').slice(0, 200),
+          enforcement: parseEnforcement(line),
+          text: line
+            .replace(/^\s*(?:[-*]|\d+\.)\s*/, '')
+            .replace(ENFORCEMENT_MARKER, '')
+            .trim()
+            .slice(0, 200),
         });
       }
     }
@@ -661,6 +698,89 @@ function formatFindings(evaluation) {
   return evaluation.violations.map((v) => `- ${v.label}: ${v.detail}`).join('\n');
 }
 
+/** Families whose remedy is a command that must be known to exist. */
+const NEEDS_COMMAND = { 'tests-ran': 'test', 'lint-ran': 'lint', 'typecheck-ran': 'typecheck', 'build-ran': 'build' };
+
+/**
+ * Can the agent actually FIX this violation on its own?
+ *
+ * This is the guard that keeps a blocking rule from becoming
+ * anthropics/claude-code#55754, where a Stop hook demanded something the agent
+ * was structurally unable to do and looped for ~50 minutes on a full session
+ * quota. "Run the tests" is only a fair demand if a test command is known to
+ * exist; in a repo with none, blocking on it can never be satisfied and the
+ * only escape is the token cap.
+ *
+ * Unknown means NOT blockable — the same "unknown is not zero" discipline the
+ * rest of this module follows, pointed at the safe direction.
+ */
+function canRemedy(violation, commands) {
+  const needed = NEEDS_COMMAND[violation && violation.family];
+  if (!needed) return true; // fixing a failing test or a stale run needs no new command
+  return (commands || []).some((c) => c.category === needed);
+}
+
+/**
+ * Does the final message explicitly say the agent is blocked or unable?
+ *
+ * Jason's observation from running a blocking gate for months: when the primary
+ * model genuinely cannot do the thing, **it says so in the message before it
+ * tries to stop again** — and his agy hook pipes that message to the reviewing
+ * model, which then usually concedes and lets the stop complete.
+ *
+ * That is a better escape valve than predicting satisfiability in advance,
+ * because the agent knows things this engine cannot: that the test script is
+ * missing, that a dependency will not install, that the work needs a decision
+ * only the user can make. Here it is done deterministically instead of with a
+ * second model call, which is the same trade ADR-011 makes everywhere else.
+ *
+ * THE OBVIOUS OBJECTION, and why this is still right: an agent could learn to
+ * type "I cannot run the tests" to escape a gate. Two things bound that. The
+ * finding is not dropped — it is demoted to `inform`, so the model still
+ * receives it and the user still sees it; only the power to halt the turn is
+ * given up. And a gate that CAN be argued with beats a gate that loops for 50
+ * minutes on a session quota (anthropics/claude-code#55754), because the first
+ * failure costs a sentence and the second costs the session.
+ */
+const BLOCKED_STATEMENT =
+  /\b(?:i (?:can'?t|cannot|am unable to|was unable to|could not|couldn'?t)|unable to|not able to|no (?:test|lint|build|typecheck)\s+(?:script|command|runner|setup)|there (?:is|are) no\b[^.\n]{0,40}\b(?:test|script|command)|blocked (?:on|by)|needs? (?:your|user) (?:input|decision|approval|permission)|requires? (?:your|user|manual)\b|only you can|out of my control|do not have (?:permission|access))\b/i;
+
+function statesBlocked(finalMessage) {
+  if (!finalMessage || typeof finalMessage !== 'string') return false;
+  // Look at the tail only. A mention of an obstacle that was then OVERCOME
+  // usually appears mid-narrative; a live blocker is stated at the hand-back.
+  const tail = finalMessage.slice(-1200);
+  return BLOCKED_STATEMENT.test(tail);
+}
+
+/**
+ * Split violations by the channel each should travel on.
+ *
+ * A violation is only promoted to `block` when the user asked for it AND the
+ * agent could plausibly act on it. Everything demoted for un-remediability
+ * still travels as `inform`, so the finding is never lost — only its power to
+ * halt the turn is.
+ */
+function routeFindings(evaluation, commands, finalMessage) {
+  const blocking = [];
+  const informing = [];
+  const notifying = [];
+  const conceded = statesBlocked(finalMessage);
+  for (const v of (evaluation && evaluation.violations) || []) {
+    const level = v.enforcement || 'inform';
+    if (level === 'notify') notifying.push(v);
+    else if (level === 'block' && !conceded && canRemedy(v, commands)) blocking.push(v);
+    else informing.push(v);
+  }
+  return { blocking, informing, notifying, conceded };
+}
+
+/** One imperative line per violation, no preamble (ADR-001's feedback shape). */
+function formatViolations(list) {
+  if (!list || list.length === 0) return '';
+  return list.map((v) => `- ${v.label}: ${v.detail}`).join('\n');
+}
+
 /**
  * The whole local pass, end to end. `parsed` is `parseTranscript`'s output.
  *
@@ -704,6 +824,10 @@ module.exports = {
   collectFacts,
   decide,
   evaluateRules,
+  routeFindings,
+  statesBlocked,
+  formatViolations,
+  canRemedy,
   proposeGates,
   formatOffers,
   formatFindings,

@@ -53,6 +53,29 @@ not checkable, and every gate available to you.
 **"Unknown" is never reported as a pass.** If no test ran at all, a "tests must
 pass" rule comes back *unknown*, not *satisfied*.
 
+### You choose what each rule does when it's broken
+
+End any rule with a marker:
+
+| Marker | What happens |
+|---|---|
+| *(none)* — **default** | The agent is told, and can act on it. The turn still ends. |
+| `[block]` | The agent **cannot end the turn** until it's addressed. |
+| `[notify]` | Only you are told. The agent is not steered. |
+
+```
+- Always run tests after changing code. [block]
+- Run lint before opening a PR.
+- Never commit without asking. [notify]
+```
+
+`[block]` is deliberately hard to misuse. It fires **at most once per turn**, it
+is skipped when the fix isn't available (no test command in the repo means "run
+the tests" is not a fair demand), and it stands down when the agent says it
+can't proceed. In every one of those cases the finding still reaches the agent —
+only its power to halt the turn is dropped. A gate you can argue with beats one
+that loops on your session quota.
+
 One honest limit of this local half: a command's outcome is the **tool call's**
 own status. A piped command or one ending in `... || true` reports success even
 when it failed underneath, and the rules engine cannot see that — reading
