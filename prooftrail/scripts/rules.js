@@ -641,6 +641,82 @@ function formatFindings(evaluation) {
   return evaluation.violations.map((v) => `- ${v.label}: ${v.detail}`).join('\n');
 }
 
+/**
+ * Evidence that a project actually HAS a tool of this category.
+ *
+ * Three independent signals, because one ecosystem's evidence is another's
+ * absence: a script name, a dependency name, or a config file. Any one is
+ * enough.
+ */
+const TOOL_EVIDENCE = {
+  test: {
+    scripts: /^(test|tests|test:.*)$/,
+    deps: /^(vitest|jest|mocha|ava|tap|@jest\/core)$/,
+    files: ['pytest.ini', 'tox.ini', 'jest.config.js', 'jest.config.ts', 'vitest.config.js', 'vitest.config.ts'],
+  },
+  lint: {
+    scripts: /^(lint|lint:.*|format|fmt)$/,
+    deps: /^(eslint|prettier|stylelint|oxlint|@biomejs\/biome)$/,
+    files: ['.eslintrc', '.eslintrc.js', '.eslintrc.json', '.eslintrc.cjs', 'eslint.config.js',
+      'eslint.config.mjs', 'biome.json', '.prettierrc', 'ruff.toml', '.flake8', '.stylelintrc'],
+  },
+  typecheck: {
+    scripts: /^(typecheck|type-check|types|tsc)$/,
+    deps: /^(typescript|mypy|pyright)$/,
+    files: ['tsconfig.json', 'mypy.ini', 'pyrightconfig.json'],
+  },
+  build: {
+    scripts: /^(build|build:.*|compile)$/,
+    deps: /^(vite|webpack|rollup|esbuild|tsup|parcel)$/,
+    files: ['Makefile', 'Cargo.toml', 'go.mod', 'build.gradle', 'pom.xml'],
+  },
+};
+
+/**
+ * Does this project HAVE a tool of this category at all?
+ *
+ * WHY THIS IS NOT `canRemedy`. exp-20 ran the engine over real sessions and
+ * found `lint-ran` firing on every one — because that repo has no linter. A
+ * check enabled for a tool the project does not have is true on every turn
+ * forever, and the agent can never clear it. Reporting that to the agent each
+ * turn is the nagware failure mode ADR-004 calls product-killing.
+ *
+ * The first fix reused `canRemedy`, which asks whether the project DOCUMENTS
+ * such a command. Right question for blocking (conservative: a gate declines to
+ * fire), wrong one for suppressing — a repo with `npm test` in package.json but
+ * not in its AGENTS.md would have a genuine "you changed code and ran no tests"
+ * finding silently withheld. Five integration tests caught that, and they were
+ * right: a miss is worse than a nag.
+ *
+ * So suppression requires POSITIVE EVIDENCE OF ABSENCE — a manifest this code
+ * can read which does not mention the tool, and no config file for it either.
+ * No manifest at all means UNKNOWN, and unknown is not absence: returning false
+ * there would silence real findings for every Python, Go and Rust project, and
+ * every monorepo package whose manifest sits at the root.
+ */
+function toolExists(category, cwd) {
+  const evidence = TOOL_EVIDENCE[category];
+  if (!evidence || !cwd) return true; // unknown category or no cwd -> never silence
+  try {
+    for (const f of evidence.files) {
+      if (fs.existsSync(path.join(cwd, f))) return true;
+    }
+    const pkgPath = path.join(cwd, 'package.json');
+    if (!fs.existsSync(pkgPath)) return true; // unknown, see doc comment
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+    for (const name of Object.keys(pkg.scripts || {})) {
+      if (evidence.scripts.test(name)) return true;
+    }
+    const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+    for (const name of Object.keys(deps)) {
+      if (evidence.deps.test(name)) return true;
+    }
+    return false; // readable manifest, no mention of the tool: real absence
+  } catch {
+    return true; // unreadable manifest is unknown, and unknown is not absence
+  }
+}
+
 /** Families whose remedy is a command that must be known to exist. */
 const NEEDS_COMMAND = { 'tests-ran': 'test', 'lint-ran': 'lint', 'typecheck-ran': 'typecheck', 'build-ran': 'build' };
 
@@ -721,13 +797,23 @@ function statesBlocked(finalMessage) {
  * would attest a heuristic as a measurement, the exact thing `decide`'s
  * `no-commit-without-permission` branch exists to avoid.
  */
-function routeFindings(evaluation, commands, finalMessage) {
+function routeFindings(evaluation, commands, finalMessage, cwd) {
   const blocking = [];
   const informing = [];
   const notifying = [];
+  const unsatisfiable = [];
   const conceded = statesBlocked(finalMessage);
   for (const v of (evaluation && evaluation.violations) || []) {
     const level = v.enforcement || 'inform';
+    // A check for a tool this project does not have can never be cleared, so
+    // telling the AGENT every turn is noise (exp-20). Routed, never dropped:
+    // it reaches the USER once, because an absent check must not look like a
+    // passing one. Gated on toolExists, NOT canRemedy -- see toolExists.
+    const needed = NEEDS_COMMAND[v.family];
+    if (needed && cwd && !toolExists(needed, cwd)) {
+      unsatisfiable.push(v);
+      continue;
+    }
     if (level === 'notify') notifying.push(v);
     else if (level === 'block' && !conceded && canRemedy(v, commands)) blocking.push(v);
     else informing.push(v);
@@ -737,7 +823,54 @@ function routeFindings(evaluation, commands, finalMessage) {
     if (level === 'notify') notifying.push(r);
     else informing.push(r); // never `blocking` -- see doc comment above
   }
-  return { blocking, informing, notifying, conceded };
+  return { blocking, informing, notifying, unsatisfiable, conceded };
+}
+
+/**
+ * The notice for checks this project cannot satisfy.
+ *
+ * Worded as a fact about the PROJECT, not an accusation about the turn — the
+ * agent did nothing wrong; the check does not apply here. It goes to the user
+ * because they are the only one who can resolve it.
+ */
+function formatUnsatisfiable(list) {
+  if (!list || list.length === 0) return '';
+  const one = list.length === 1;
+  const names = list.map((v) => `\`${v.family}\``).join(', ');
+  return [
+    `Prooftrail: ${names} ${one ? 'is' : 'are'} switched on in your rules, but this project has ` +
+      `no such tool — no script, no dependency, and no config file for it.`,
+    `So the check can never pass, no matter what the agent does. Prooftrail has stopped ` +
+      `reporting ${one ? 'it' : 'them'} rather than repeat ${one ? 'it' : 'them'} every turn.`,
+    `Two ways to fix it: switch ${one ? 'it' : 'them'} off at ${DASHBOARD_RULES_URL}, or add the ` +
+      `tool to this project. Either makes this message stop.`,
+  ].join('\n');
+}
+
+/**
+ * The same explanation, addressed to the AGENT.
+ *
+ * Jason, 2026-08-01: *"a demo should enable the user to be successful not bake
+ * in hidden knowledge... if a loop is occurring because of a bad setting, the
+ * hook should instruct the user and/or the AI on why it's happening and what to
+ * do about it."*
+ *
+ * The agent has usually just been told about this rule on previous turns and is
+ * the party that has been trying and failing to satisfy it. Silently dropping
+ * the finding fixes the nag and leaves the agent guessing about a rule that
+ * stopped being mentioned. So it is told once, plainly, that the check was
+ * withdrawn and that the fix is the user's — which also stops it from
+ * "helpfully" installing a linter nobody asked for.
+ */
+function formatUnsatisfiableForAgent(list) {
+  if (!list || list.length === 0) return '';
+  const names = list.map((v) => `\`${v.family}\``).join(', ');
+  return (
+    `Prooftrail: ${names} cannot be satisfied in this project — there is no such tool here — so ` +
+    `${list.length === 1 ? 'it has' : 'they have'} been withdrawn and you are not expected to ` +
+    `act on ${list.length === 1 ? 'it' : 'them'}. The user has been told how to resolve it. Do ` +
+    `not install or configure the tool unless they ask.`
+  );
 }
 
 /** One imperative line per violation, no preamble (ADR-001's feedback shape). */
@@ -801,6 +934,9 @@ module.exports = {
   decide,
   evaluateRules,
   routeFindings,
+  toolExists,
+  formatUnsatisfiable,
+  formatUnsatisfiableForAgent,
   statesBlocked,
   formatViolations,
   canRemedy,

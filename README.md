@@ -67,6 +67,13 @@ checkable yet — if you already have a working gate you will never see it. Run
 **`/prooftrail:rules`** any time for the full picture: what is checked, what is
 not checkable, and every gate available to you.
 
+**A check your project can't satisfy is withdrawn, and explained.** Switch on
+`lint-ran` in a project with no linter and the check can never pass, no matter
+what the agent does. Rather than repeat that every turn, Prooftrail withdraws it
+and tells you which check, why, and both ways to fix it — switch it off, or add
+the tool. The agent is told separately that the check was withdrawn and that it
+should *not* go install the tool on its own.
+
 **"Unknown" is never reported as a pass.** If no test ran at all, a "tests must
 pass" rule comes back *unknown*, not *satisfied*.
 

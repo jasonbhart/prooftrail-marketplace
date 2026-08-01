@@ -22,10 +22,19 @@ const {
   resolvePromptId,
   shouldShowQuotaNotice,
   shouldShowGateOffer,
+  shouldShowUnsatNotice,
   shouldShowConnectNotice,
   idempotencyKey,
 } = require('./lib');
-const { runLocalRules, collectFacts, routeFindings, formatViolations, formatOffers } = require('./rules');
+const {
+  runLocalRules,
+  collectFacts,
+  routeFindings,
+  formatViolations,
+  formatUnsatisfiable,
+  formatUnsatisfiableForAgent,
+  formatOffers,
+} = require('./rules');
 const { readRulesCache, writeRulesCache, cachePath } = require('./rules-cache');
 const {
   RECURSION_ENV,
@@ -127,7 +136,8 @@ async function main() {
   // 15 MB and this hook runs on every turn.
   const parsedTranscript = parseTranscript(evt.transcript_path);
   let localFindings = '';   // notify-level: the user only
-  let localForModel = '';   // inform-level: additionalContext
+  let localForModel = '';
+  let unsatForModel = '';   // inform-level: additionalContext
   let blockReason = '';     // block-level: decision:"block"
   let gateOffer = '';
   // Judgment rules: measured PROSE the service ships for judgment families
@@ -172,8 +182,17 @@ async function main() {
     // Each violation travels on the channel its own rule asked for. Default is
     // `inform` -- the model sees it, the turn still ends. A rules gate whose
     // findings only ever reached the user was a reporting tool, not a gate.
-    const routed = routeFindings(local && local.evaluation, local && local.commands, finalMessage);
+    const routed = routeFindings(local && local.evaluation, local && local.commands, finalMessage, evt.cwd);
     localFindings = formatViolations(routed.notifying);
+
+    // A check for a tool this project does not have can never pass, so it is
+    // withdrawn rather than repeated every turn (exp-20). BOTH parties are told
+    // once, and told what to do -- a setting that silently changes behaviour is
+    // the hidden knowledge a demo should not require someone to already have.
+    if (routed.unsatisfiable.length && shouldShowUnsatNotice(evt.session_id)) {
+      localFindings = [localFindings, formatUnsatisfiable(routed.unsatisfiable)].filter(Boolean).join('\n\n');
+      unsatForModel = formatUnsatisfiableForAgent(routed.unsatisfiable);
+    }
     localForModel = formatViolations(routed.informing);
 
     // BLOCKING IS THE GUARDED PATH, and both guards are load-bearing.
@@ -293,7 +312,7 @@ async function main() {
     }
     emitHookOutput({
       systemMessage: unauth.join('\n\n'),
-      additionalContext: localForModel ? `Prooftrail (your rules):\n${localForModel}` : '',
+      additionalContext: [localForModel ? `Prooftrail (your rules):\n${localForModel}` : '', unsatForModel].filter(Boolean).join('\n\n'),
       blockReason: blockReason ? `Prooftrail (your rules):\n${blockReason}` : '',
     });
     return;
@@ -326,7 +345,7 @@ async function main() {
     if (text) parts.push(text);
     emitHookOutput({
       systemMessage: parts.join('\n'),
-      additionalContext: localForModel ? `Prooftrail (your rules):\n${localForModel}` : '',
+      additionalContext: [localForModel ? `Prooftrail (your rules):\n${localForModel}` : '', unsatForModel].filter(Boolean).join('\n\n'),
       blockReason: blockReason ? `Prooftrail (your rules):\n${blockReason}` : '',
     });
   };
@@ -463,7 +482,7 @@ async function main() {
   }
   emitHookOutput({
     systemMessage: parts.join('\n'),
-    additionalContext: localForModel ? `Prooftrail (your rules):\n${localForModel}` : '',
+    additionalContext: [localForModel ? `Prooftrail (your rules):\n${localForModel}` : '', unsatForModel].filter(Boolean).join('\n\n'),
     blockReason: blockReason ? `Prooftrail (your rules):\n${blockReason}` : '',
   });
   // approve with no notice -> silent

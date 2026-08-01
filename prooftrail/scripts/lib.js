@@ -153,6 +153,24 @@ function shouldShowQuotaNotice(sessionId, nowMs = Date.now()) {
   }
 }
 
+function unsatMarkerPath(sessionId, nowMs) {
+  return path.join(stateDir(), `unsat-${safeSessionId(sessionId)}-${utcDateStr(nowMs)}.json`);
+}
+
+/**
+ * Once per (session, UTC day), same shape and same INVERTED fail-soft as the
+ * gate offer below: an unsolicited notice stays SILENT on an fs error. A
+ * misconfiguration that has been true all week is not worth risking noise over.
+ */
+function shouldShowUnsatNotice(sessionId, nowMs = Date.now()) {
+  try {
+    fs.writeFileSync(unsatMarkerPath(sessionId, nowMs), '1', { flag: 'wx' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function gateOfferMarkerPath(sessionId, nowMs) {
   return path.join(stateDir(), `gate-offer-${safeSessionId(sessionId)}-${utcDateStr(nowMs)}.json`);
 }
@@ -1596,6 +1614,7 @@ module.exports = {
   resolvePromptId,
   shouldShowQuotaNotice,
   shouldShowGateOffer,
+  shouldShowUnsatNotice,
   shouldShowConnectNotice,
   idempotencyKey,
   pluginRoots,
