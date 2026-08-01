@@ -141,7 +141,7 @@ async function main() {
   let blockReason = '';     // block-level: decision:"block"
   let gateOffer = '';
   // Judgment rules: measured PROSE the service ships for judgment families
-  // that are `on` (rulesDb.ts's `judgment_prose`, inside the same signed
+  // that are `on` (rulesDb.ts's `judgment-prose`, inside the same signed
   // cache as `checks`), turned into `{family, label, computable: false,
   // enforcement: 'judge', text}` objects by rulesFromCache. Never a computable
   // rule, and never routed through routeFindings -- see prependHouseRules for
@@ -227,7 +227,7 @@ async function main() {
   }
 
   // ---- the optional LOCAL AGENT pass (ADR-012, Task 7) ----------------------
-  // `deep_check` is now a server-held setting, delivered inside the same
+  // `deep-check` is now a server-held setting, delivered inside the same
   // signed cache as every other rule (rules-cache.js) -- not a client env var
   // choice. `off` means "do nothing" and is also the fallback when there is
   // no cache at all (never connected, or a tampered cache that failed
@@ -241,7 +241,7 @@ async function main() {
   //             why the window expiring does not kill the job.
   let agentFinding = '';
   try {
-    const deepMode = (cachedRules && cachedRules.rules && cachedRules.rules.deep_check) || 'off';
+    const deepMode = (cachedRules && cachedRules.rules && cachedRules.rules['deep-check']) || 'off';
     if (deepMode !== 'off') {
       // Collect BEFORE starting, so a finished answer is surfaced rather than
       // replaced by a fresh job (unchanged from ADR-012).

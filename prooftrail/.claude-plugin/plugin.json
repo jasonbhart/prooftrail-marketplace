@@ -1,6 +1,6 @@
 {
   "name": "prooftrail",
-  "version": "0.8.3",
+  "version": "0.9.0",
   "description": "Prooftrail — checks your AI coding agent against the rules you set, at the end of every turn. Set your rules once (tests ran, they passed, the run happened after the last edit, and more), and every session decides the mechanical ones locally and instantly, with no extra model call. Pair a hosted judge to also check the rules that need judgment, and whether the final message is supported by what actually happened. Advisory: it never blocks.",
   "author": {
     "name": "Jason (Domain Methods)"
@@ -15,7 +15,7 @@
     "LOCAL_AGENT": {
       "type": "string",
       "title": "Local agent for deep claim checks (optional)",
-      "description": "Which local CLI may run deep claim checks: `auto` for whichever of codex or agy is installed, or name one. THIS IS ONE OF TWO GATES and both must be open. This one chooses the tool; the other is the `deep_check` setting in your Prooftrail rules (off / inform / await), which lives on the server so an agent cannot switch off its own verifier. Set this and leave `deep_check` off and nothing runs — that is not a bug. Deep checks run read-only on YOUR model credentials; nothing leaves your machine.",
+      "description": "Which local CLI may run deep claim checks: `auto` for whichever of codex or agy is installed, or name one. THIS IS ONE OF TWO GATES and both must be open. This one chooses the tool; the other is the `deep-check` setting in your Prooftrail rules (off / inform / await), which lives on the server so an agent cannot switch off its own verifier. Set this and leave `deep-check` off and nothing runs — that is not a bug. Deep checks run read-only on YOUR model credentials; nothing leaves your machine.",
       "required": false,
       "default": ""
     },

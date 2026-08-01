@@ -500,7 +500,7 @@ function formatJob(result) {
 
 /**
  * Wait up to `windowMs` for a running job, polling for completion. Used only
- * by `deep_check: 'await'` (Task 7) -- `inform` mode never calls this and
+ * by `deep-check: 'await'` (Task 7) -- `inform` mode never calls this and
  * keeps the original detached, reported-next-turn behaviour (ADR-012).
  *
  * When the window expires this returns `null` and DELIBERATELY LEAVES THE JOB

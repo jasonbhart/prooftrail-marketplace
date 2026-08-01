@@ -144,7 +144,7 @@ const RULE_FAMILIES = [
  * update" instead of silently dropping a check its user believes is running.
  *
  * `judgment` carries the JUDGMENT rules -- prose the SERVICE has already
- * decided to ship (rulesDb.ts's `judgment_prose`, inside the same signed
+ * decided to ship (rulesDb.ts's `judgment-prose`, inside the same signed
  * envelope as `checks`), one entry per family present there, shaped
  * `{family, label, computable: false, enforcement: 'judge', text}`. This is a
  * SEPARATE mechanism from `checks`/`rules`, and the two are returned under
@@ -152,7 +152,7 @@ const RULE_FAMILIES = [
  * predicate, so `decide`/`evaluateRules` cannot score it and it must never
  * reach `routeFindings`; a computable rule carries no measured prose, so it
  * must never reach `prependHouseRules` and be read to the judge as a house
- * rule. Forwarded for ANY family key present in `judgment_prose`, not just
+ * rule. Forwarded for ANY family key present in `judgment-prose`, not just
  * ones this client's `RULE_FAMILIES`/`JUDGMENT_FAMILIES` happen to know about
  * -- unlike `checks`, an unrecognised judgment family is not a capability gap
  * to warn about, it is just text for the judge to read, and gating it on a
@@ -174,8 +174,8 @@ function rulesFromCache(cached) {
     const enforcement = cached.stale && level === 'block' ? 'inform' : level;
     out.push({ family: f.family, label: f.label, computable: f.computable, enforcement });
   }
-  const prose = cached.rules.judgment_prose && typeof cached.rules.judgment_prose === 'object'
-    ? cached.rules.judgment_prose
+  const prose = cached.rules['judgment-prose'] && typeof cached.rules['judgment-prose'] === 'object'
+    ? cached.rules['judgment-prose']
     : {};
   const judgment = Object.keys(prose)
     .filter((family) => typeof prose[family] === 'string' && prose[family].trim())

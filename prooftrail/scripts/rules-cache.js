@@ -84,8 +84,8 @@ const cachePath = () => path.join(stateDir(), 'rules.json');
 const SIGNED_RULESET_FIELDS = [
   'checks',
   'judgment',
-  'judgment_prose',
-  'deep_check',
+  'judgment-prose',
+  'deep-check',
   'version',
   'updated_at',
   'updated_by',
@@ -94,7 +94,7 @@ const SIGNED_RULESET_FIELDS = [
 
 /** Mirrors rulesSign.ts's RECORD_FIELDS -- these fields need key-sorted
  * serialization; everything else is a plain scalar written as-is. */
-const RECORD_FIELDS = new Set(['checks', 'judgment', 'judgment_prose']);
+const RECORD_FIELDS = new Set(['checks', 'judgment', 'judgment-prose']);
 
 /**
  * Canonical encoding. MUST byte-match packages/service/convex/rulesSign.ts's

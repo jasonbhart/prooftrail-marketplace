@@ -22,7 +22,7 @@ about — discovery starts at the working directory.
    if(!cached){console.log("No rules configured, or not connected — run /prooftrail:setup. Rules come from the connected account, not from a repo file.");}
    else{
      console.log("Rule set version "+cached.version+(cached.stale?" (STALE — "+Math.round(cached.age_days)+" day(s) old; block enforcement is demoted to inform until the next successful review)":""));
-     console.log("Deep check: "+cached.rules.deep_check);
+     console.log("Deep check: "+cached.rules["deep-check"]);
    }
    console.log("");
    const chk=r.rules.filter(x=>x.computable), un=r.rules.filter(x=>!x.computable);
