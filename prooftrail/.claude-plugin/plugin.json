@@ -1,7 +1,7 @@
 {
   "name": "prooftrail",
-  "version": "0.9.0",
-  "description": "Prooftrail — checks your AI coding agent against the rules you set, at the end of every turn. Set your rules once (tests ran, they passed, the run happened after the last edit, and more), and every session decides the mechanical ones locally and instantly, with no extra model call. Pair a hosted judge to also check the rules that need judgment, and whether the final message is supported by what actually happened. Advisory: it never blocks.",
+  "version": "0.9.1",
+  "description": "Prooftrail — checks your AI coding agent against the rules you set, at the end of every turn. Set your rules once on your account (tests ran, they passed, the run happened after the last edit, and more) and every session decides the mechanical ones on your own machine, with no extra model call. You choose, per rule, whether a finding blocks the turn, tells the agent, or only tells you. Rules live on the server, so the agent being checked cannot edit its own gate. Optional hosted judge for the rules that need judgment.",
   "author": {
     "name": "Jason (Domain Methods)"
   },

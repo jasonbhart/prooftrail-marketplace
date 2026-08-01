@@ -115,15 +115,15 @@ on purpose:
 | Switch | Where | What it decides |
 |---|---|---|
 | **`LOCAL_AGENT`** | plugin settings, on your machine | *which* CLI may run — `auto`, `codex`, or `agy`. Empty means off |
-| **`deep_check`** | your rules, on the server | *whether* it runs — `off`, `inform`, or `await` |
+| **`deep-check`** | your rules, on the server | *whether* it runs — `off`, `inform`, or `await` |
 
-To turn it **on**: set `LOCAL_AGENT` to `auto`, and set `deep_check` to `inform`
+To turn it **on**: set `LOCAL_AGENT` to `auto`, and set `deep-check` to `inform`
 at https://supervisor-dashboard.pages.dev/rules.
 To turn it **off**: clear either one. Clearing `LOCAL_AGENT` stops it on this
-machine only; setting `deep_check` to `off` stops it everywhere you're signed in.
+machine only; setting `deep-check` to `off` stops it everywhere you're signed in.
 
 The server half exists so an agent cannot switch off its own verifier by editing
-a file. If you set `LOCAL_AGENT` and nothing happens, check `deep_check` — that
+a file. If you set `LOCAL_AGENT` and nothing happens, check `deep-check` — that
 is the usual cause, and it is not a bug.
 
 `inform` runs the check in the background and reports on your next turn.
@@ -157,10 +157,13 @@ shipping. `opencode` is deliberately excluded — it has no read-only mode, only
 approval in a background job. An adapter ships here only if it can be pinned
 read-only and has actually been run.
 
-Honest limits: it is an LLM, so it is advisory like everything else here and it
-never blocks. It is told to answer UNVERIFIABLE rather than guess, and when a
-claim checks out it says nothing at all. If your agent CLI is not logged in it
-will say so rather than quietly doing nothing.
+Honest limits: it is an LLM, so treat it as a second opinion. On `inform` it
+never blocks — it reports on your next turn and the turn it examined has already
+ended. On `await` a refutation *can* stop the turn, which is the whole reason
+that mode exists; if you do not want that, leave `deep-check` on `inform`. It is
+told to answer UNVERIFIABLE rather than guess, and when a claim checks out it
+says nothing at all. If your agent CLI is not logged in it will say so rather
+than quietly doing nothing.
 
 ## The optional hosted half
 
@@ -190,12 +193,13 @@ and a content hash — never your code.
 
 ## Behavior
 
-- **Advisory by default.** Nothing blocks unless you marked a rule `[block]`
-  yourself. A failure, timeout, unreachable service, or exhausted quota passes
-  straight through and the session continues — every path exits 0.
-- **The hosted judge never blocks, at all.** Only your own mechanically-checked
-  rules can, and only the ones you marked. A judged verdict is a second opinion,
-  not a gate.
+- **Advisory by default.** Every check ships `off`. Nothing blocks until you set
+  a rule to `block` in the dashboard yourself. A failure, timeout, unreachable
+  service, or exhausted quota passes straight through and the session continues
+  — every path exits 0.
+- **The hosted judge never blocks, at all.** Only checks decided on your machine
+  can — the rules you set to `block`, and a `deep-check` refutation in `await`
+  mode. A judged verdict is a second opinion, not a gate.
 - **Local findings survive a service outage.** They needed no network to
   produce, so losing the network does not lose them.
 - **`SERVICE_URL` ships with a default** pointing at the hosted service.
