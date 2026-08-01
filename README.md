@@ -109,10 +109,29 @@ backwards compatible."* *"I refactored Y to use Z."* Nothing in a session trace
 can confirm or deny those — and a command ending in `|| true` reports success
 even when it failed underneath.
 
-If you have `codex` or `agy` installed, set the
-**`LOCAL_AGENT`** plugin setting to `auto` (or name one). When a final message
-claims something the trace cannot support, Prooftrail asks that CLI to check it
-against your actual repository:
+**There are two switches, and both must be on.** They live in different places
+on purpose:
+
+| Switch | Where | What it decides |
+|---|---|---|
+| **`LOCAL_AGENT`** | plugin settings, on your machine | *which* CLI may run — `auto`, `codex`, or `agy`. Empty means off |
+| **`deep_check`** | your rules, on the server | *whether* it runs — `off`, `inform`, or `await` |
+
+To turn it **on**: set `LOCAL_AGENT` to `auto`, and set `deep_check` to `inform`
+at https://supervisor-dashboard.pages.dev/rules.
+To turn it **off**: clear either one. Clearing `LOCAL_AGENT` stops it on this
+machine only; setting `deep_check` to `off` stops it everywhere you're signed in.
+
+The server half exists so an agent cannot switch off its own verifier by editing
+a file. If you set `LOCAL_AGENT` and nothing happens, check `deep_check` — that
+is the usual cause, and it is not a bug.
+
+`inform` runs the check in the background and reports on your next turn.
+`await` makes the turn wait up to two minutes for the answer, and lets a
+refutation stop the turn.
+
+When a final message claims something the trace cannot support, Prooftrail asks
+that CLI to check it against your actual repository:
 
 ```
 Prooftrail (agy, last turn): a claim did NOT hold up.
