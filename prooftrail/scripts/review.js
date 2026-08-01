@@ -307,9 +307,14 @@ async function main() {
         ? 'Not connected — run /prooftrail:setup to add hosted review.'
         : 'Prooftrail: not connected — run /prooftrail:setup to enable reviews.',
     );
-    if (!cachedRules && shouldShowConnectNotice(evt.session_id)) {
-      unauth.push('Prooftrail: connect to enable rule checks — /prooftrail:setup.');
-    }
+    // DELIBERATELY NO second connect line here. This branch already says
+    // "not connected — run /prooftrail:setup" immediately above, and a
+    // brand-new user's very first impression was those two near-identical
+    // sentences stacked. That reads as a bug, which is a poor opening for a
+    // tool whose whole pitch is that it notices things. Found by walking the
+    // cold-start path on the published build; `shouldShowConnectNotice` is kept
+    // for the case this one never covered — a PAIRED install with no rule set
+    // yet, where the user is connected, sees nothing, and has no idea why.
     emitHookOutput({
       systemMessage: unauth.join('\n\n'),
       additionalContext: [localForModel ? `Prooftrail (your rules):\n${localForModel}` : '', unsatForModel].filter(Boolean).join('\n\n'),
