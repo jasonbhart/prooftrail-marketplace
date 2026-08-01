@@ -44,16 +44,31 @@
  * applicable rather than satisfied, and no transcript means everything is
  * unknown rather than fine.
  *
- * It also does not pretend to check what it cannot. 17.6% of repos that write
- * rules write ones no deterministic checker can score — follow-existing-
- * patterns (7.4%), error handling (5.1%), input validation (5.1%). Those are
- * reported by name as unchecked. Saying so plainly is the honest story, and it
- * is also the only way a user can tell what the tool is worth.
+ * WHERE THE RULES THEMSELVES COME FROM.
+ *
+ * They used to be parsed out of AGENTS.md/CLAUDE.md prose. That is gone: a file
+ * in the repo is editable by the agent being checked, so a rule read from it
+ * could never carry an integrity property, and an agent that wanted to weaken
+ * its own gate only had to edit a markdown file. Rules now arrive exclusively
+ * through `rulesFromCache`, reading the Ed25519-signed set Task 4's
+ * `rules-cache.js` verified and cached. An unconnected install — no cache —
+ * performs no checks. That is the point, not an oversight.
+ *
+ * The project doc (AGENTS.md/CLAUDE.md) is still read, but for exactly one
+ * remaining purpose: `extractCommands` mines it for commands already
+ * documented there, to OFFER a gate on them. An offer is inert text proposed to
+ * the user, never something the repo can silently turn into an enforced rule
+ * — the same integrity argument that moved rule definitions out in the first
+ * place.
  */
 const fs = require('node:fs');
 const path = require('node:path');
 const { basename } = path;
 const { classifyCommand } = require('./lib');
+
+/** Where a documented-command offer sends the user to actually turn a check
+ * on -- there is no longer a file to edit, only an account setting. */
+const DASHBOARD_RULES_URL = 'https://supervisor-dashboard.pages.dev/rules';
 
 /** Categories that CHECK the work, as opposed to performing or shipping it. */
 const VERIFYING_CATEGORIES = new Set(['test', 'build', 'lint', 'typecheck']);
@@ -69,113 +84,107 @@ const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit', 'MultiEdit']);
  */
 const PROSE_EXTENSIONS = /\.(md|mdx|markdown|txt|rst|adoc)$/i;
 
-/** Discovery order. AGENTS.md first — it is winning the filename war (§5). */
-const RULES_FILENAMES = ['AGENTS.md', 'CLAUDE.md', '.cursorrules', '.claude/CLAUDE.md'];
+/** Discovery order for the project doc. AGENTS.md first — it is winning the
+ * filename war (§5 of the original rules-file research). */
+const PROJECT_DOC_FILENAMES = ['AGENTS.md', 'CLAUDE.md', '.cursorrules', '.claude/CLAUDE.md'];
 
 /** Bounds every file read, so a pathological repo cannot stall the Stop hook. */
-const MAX_RULES_BYTES = 256 * 1024;
+const MAX_DOC_BYTES = 256 * 1024;
 /** `@import` recursion bound — cycles are also tracked by realpath below. */
 const MAX_IMPORT_DEPTH = 3;
-/** How far up the tree to look for a rules file. */
+/** How far up the tree to look for a project doc. */
 const MAX_PARENT_WALK = 8;
 
 /**
  * Rule families.
  *
- * `detect` matches a line of a rules file. `family` names the fact it resolves
- * against. Ordering matters only for reporting; a line may match several
- * families and each is recorded once.
+ * `family` names the fact the evaluator (`decide`) resolves against; `label`
+ * is the human-readable name used in feedback and offers; `computable` says
+ * whether a deterministic check exists for it at all (the `undecidable` ones
+ * below are listed NOT to check them but so a rule the service turns on for
+ * them can still be reported as unchecked, never silently ignored).
  *
- * The `computable` families are ranked by how often real repos write them
- * (docs/reviews/2026-07-31-what-rules-people-write.md §2, ranks 1-12 cover
- * 59.1% of all repos that write any rule). The `undecidable` ones are listed
- * NOT to check them but so the engine can name them as unchecked — a rule the
- * user wrote and we silently ignored is worse than one we decline out loud.
+ * There used to be a `detect` regex here, matched against a line of a rules
+ * file to discover whether the user had WRITTEN this rule. That mechanism is
+ * gone along with local rule discovery — enforcement now comes exclusively
+ * from `rulesFromCache` — but the family list itself, and the evaluator built
+ * on it, did not move.
  */
 const RULE_FAMILIES = [
-  {
-    family: 'tests-ran',
-    computable: true,
-    label: 'run tests',
-    // "run the tests", "make sure tests pass", "always run pytest", "npm test"
-    detect: /\b(?:run|running|execute|always run|must run|make sure|ensure|verify)\b[^.\n]{0,60}\b(?:tests?|test suite|unit tests?|pytest|vitest|jest|go test|cargo test|npm test|yarn test|pnpm test)\b/i,
-  },
-  {
-    family: 'tests-passed',
-    computable: true,
-    label: 'tests must pass',
-    detect: /\btests?\b[^.\n]{0,40}\b(?:pass|passing|green|succeed)\b|\b(?:all|the)\s+tests?\s+(?:must|should|need to)\b/i,
-  },
-  {
-    family: 'lint-ran',
-    computable: true,
-    label: 'run lint',
-    detect: /\b(?:run|running|execute|always run|must run|ensure)\b[^.\n]{0,60}\b(?:lint|linter|eslint|ruff|flake8|clippy|prettier|biome|format(?:ter)?)\b/i,
-  },
-  {
-    family: 'typecheck-ran',
-    computable: true,
-    label: 'run typecheck',
-    detect: /\b(?:run|running|execute|always run|must run|ensure)\b[^.\n]{0,60}\b(?:typecheck|type-check|type check|tsc|mypy|pyright)\b/i,
-  },
-  {
-    family: 'build-ran',
-    computable: true,
-    label: 'run build',
-    detect: /\b(?:run|running|execute|always run|must run|ensure)\b[^.\n]{0,60}\b(?:build|compile|make\b)/i,
-  },
-  {
-    family: 'verify-after-edit',
-    computable: true,
-    label: 'verify before claiming done',
-    // Tightened after a dry-run over the 2,203-file corpus: a looser version
-    // anchored on a bare `before|after` plus stems like `complet`/`declar`
-    // matched "Never start servers with raw `&`" and a paragraph about three
-    // config files, because `complet` also matches "completely". Both halves
-    // now require the verify-then-claim shape explicitly.
-    detect: /\b(?:verif|validat|test|check|confirm)\w*\b[^.\n]{0,40}\bbefore\b[^.\n]{0,30}\b(?:claim|say|report|declar|mark|done|complet|finish)\w*\b|\b(?:don'?t|do not|never)\b[^.\n]{0,30}\b(?:claim|say|report|mark|tell|state)\w*\b[^.\n]{0,40}\b(?:done|complet|finish|working|fixed|passing)\w*\b/i,
-  },
-  {
-    family: 'no-commit-without-permission',
-    computable: true,
-    label: 'no commit/push without asking',
-    // Must be about AUTHORISATION, not about what may be committed. The first
-    // draft matched any prohibition containing "commit", so "Do not commit
-    // secrets", "Never force push ... unless the user requests it" and "use
-    // `pnpm run commit` instead of `git commit`" all registered as this rule --
-    // 14.8% of the corpus, nearly all of it the wrong rule. Attributing a
-    // finding to a rule the user did not write is worse than missing one.
-    detect: /\b(?:commit|push|merge)\w*\b[^.\n]{0,60}\b(?:without (?:permission|asking|approval|explicit|being told)|unless (?:explicitly |the user |i )?(?:ask|request|instruct|tell|confirm|approv|say)|ask (?:first|before|me|for permission|the user)|(?:my|user'?s?|explicit) (?:permission|approval|consent))\b|\b(?:never|do not|don'?t)\b[^.\n]{0,30}\b(?:commit|push)\w*\b[^.\n]{0,40}\b(?:unless|until|without)\b/i,
-  },
-  // ---- written often, genuinely undecidable here (research §5) --------------
-  {
-    family: 'follow-existing-patterns',
-    computable: false,
-    label: 'follow existing patterns',
-    detect: /\b(?:follow|match|respect|adhere to|consistent with)\b[^.\n]{0,40}\b(?:existing|current|established|surrounding|codebase)\b[^.\n]{0,30}\b(?:patterns?|conventions?|style|idioms?)\b/i,
-  },
-  {
-    family: 'error-handling',
-    computable: false,
-    label: 'error handling',
-    detect: /\b(?:handle|proper|graceful|appropriate)\b[^.\n]{0,30}\berrors?\b|\berror handling\b/i,
-  },
-  {
-    family: 'input-validation',
-    computable: false,
-    label: 'input validation',
-    detect: /\b(?:validate|validation|sanitiz)\w*\b[^.\n]{0,30}\b(?:input|user data|parameters?|arguments?)\b/i,
-  },
-  {
-    family: 'scope-discipline',
-    computable: false,
-    label: 'stay in scope / YAGNI',
-    detect: /\byagni\b|\b(?:don'?t|do not|never|avoid)\b[^.\n]{0,40}\b(?:over-?engineer|scope creep|gold-?plat|unnecessary abstraction|speculative)\b|\bonly\b[^.\n]{0,30}\bwhat (?:was|is) asked\b/i,
-  },
+  { family: 'tests-ran', computable: true, label: 'run tests' },
+  { family: 'tests-passed', computable: true, label: 'tests must pass' },
+  { family: 'lint-ran', computable: true, label: 'run lint' },
+  { family: 'typecheck-ran', computable: true, label: 'run typecheck' },
+  { family: 'build-ran', computable: true, label: 'run build' },
+  { family: 'verify-after-edit', computable: true, label: 'verify before claiming done' },
+  { family: 'no-commit-without-permission', computable: true, label: 'no commit/push without asking' },
+  // ---- genuinely undecidable here (no deterministic checker exists) --------
+  { family: 'follow-existing-patterns', computable: false, label: 'follow existing patterns' },
+  { family: 'error-handling', computable: false, label: 'error handling' },
+  { family: 'input-validation', computable: false, label: 'input validation' },
+  { family: 'scope-discipline', computable: false, label: 'stay in scope / YAGNI' },
 ];
 
 /**
- * Commands documented in a rules file, by the category they would gate.
+ * Turn a server rule set (Task 1's `RuleSet`, delivered through Task 4's
+ * verified cache) into the rule objects the evaluator consumes.
+ *
+ * `off` families are omitted entirely rather than carried with a flag: a rule
+ * that is off should be indistinguishable from a rule that was never written,
+ * so it can never appear in a report as "checked and passing".
+ *
+ * A STALE cache (Task 4's `stale` flag — older than `STALE_AFTER_DAYS`)
+ * demotes `block` to `inform`. A week-old rule should not be able to halt a
+ * turn — but enforcing nothing on a stale cache would let one service outage
+ * silently disable every check, which is the exact failure this module exists
+ * to avoid.
+ *
+ * `unknown` counts families the SERVER sent that this client's `RULE_FAMILIES`
+ * does not recognise, so an old client can say "a newer check needs a plugin
+ * update" instead of silently dropping a check its user believes is running.
+ *
+ * `judgment` carries the JUDGMENT rules -- prose the SERVICE has already
+ * decided to ship (rulesDb.ts's `judgment_prose`, inside the same signed
+ * envelope as `checks`), one entry per family present there, shaped
+ * `{family, label, computable: false, enforcement: 'judge', text}`. This is a
+ * SEPARATE mechanism from `checks`/`rules`, and the two are returned under
+ * distinct keys so they can never mix: a judgment rule carries prose, not a
+ * predicate, so `decide`/`evaluateRules` cannot score it and it must never
+ * reach `routeFindings`; a computable rule carries no measured prose, so it
+ * must never reach `prependHouseRules` and be read to the judge as a house
+ * rule. Forwarded for ANY family key present in `judgment_prose`, not just
+ * ones this client's `RULE_FAMILIES`/`JUDGMENT_FAMILIES` happen to know about
+ * -- unlike `checks`, an unrecognised judgment family is not a capability gap
+ * to warn about, it is just text for the judge to read, and gating it on a
+ * client-side allowlist would silently drop an already-signed, already-on
+ * rule until the plugin catches up.
+ *
+ * Returns `{ rules: [], judgment: [], unknown: 0 }` for anything that isn't a
+ * usable cache — no cache, no token yet, a verification failure — never
+ * throws, never fabricates a rule.
+ */
+function rulesFromCache(cached) {
+  if (!cached || !cached.rules || !cached.rules.checks) return { rules: [], judgment: [], unknown: 0 };
+  const known = new Set(RULE_FAMILIES.map((f) => f.family));
+  const unknown = Object.keys(cached.rules.checks).filter((f) => !known.has(f)).length;
+  const out = [];
+  for (const f of RULE_FAMILIES) {
+    const level = cached.rules.checks[f.family];
+    if (!level || level === 'off') continue;
+    const enforcement = cached.stale && level === 'block' ? 'inform' : level;
+    out.push({ family: f.family, label: f.label, computable: f.computable, enforcement });
+  }
+  const prose = cached.rules.judgment_prose && typeof cached.rules.judgment_prose === 'object'
+    ? cached.rules.judgment_prose
+    : {};
+  const judgment = Object.keys(prose)
+    .filter((family) => typeof prose[family] === 'string' && prose[family].trim())
+    .map((family) => ({ family, label: family, computable: false, enforcement: 'judge', text: prose[family] }));
+  return { rules: out, judgment, unknown };
+}
+
+/**
+ * Commands documented in a project doc, by the category they would gate.
  *
  * This is research finding §3, and the largest single opportunity it found:
  * **59.9% of files mention a test command, but only 9.3% tie one to an
@@ -254,19 +263,19 @@ function stripTrailingComment(cmd) {
 }
 
 /**
- * Read a rules file, following a symlink and inlining `@imports` one level at
+ * Read a project doc, following a symlink and inlining `@imports` one level at
  * a time.
  *
- * Both cases are real and both silently yield nothing if unhandled (research
- * §5): `vercel/next.js`, `apache/airflow` and `ghostty-org/ghostty` ship
- * `CLAUDE.md` as a **symlink** whose raw content is the literal string
- * `AGENTS.md`, and `block/goose` ships an 11-byte `CLAUDE.md` containing
- * `@AGENTS.md`. A naive reader finds zero rules in each.
+ * Both cases are real and both silently yield nothing if unhandled: vercel's
+ * next.js, apache/airflow and ghostty-org/ghostty ship `CLAUDE.md` as a
+ * **symlink** whose raw content is the literal string `AGENTS.md`, and
+ * block/goose ships an 11-byte `CLAUDE.md` containing `@AGENTS.md`. A naive
+ * reader finds zero content in each.
  *
  * `seen` holds realpaths, so an import cycle terminates on the first repeat
  * rather than on the depth bound alone.
  */
-function readRulesFile(file, depth = 0, seen = new Set()) {
+function readDocFile(file, depth = 0, seen = new Set()) {
   if (depth > MAX_IMPORT_DEPTH) return null;
   let real;
   try {
@@ -281,17 +290,17 @@ function readRulesFile(file, depth = 0, seen = new Set()) {
   try {
     const stat = fs.statSync(real);
     if (!stat.isFile()) return null;
-    text = fs.readFileSync(real, 'utf8').slice(0, MAX_RULES_BYTES);
+    text = fs.readFileSync(real, 'utf8').slice(0, MAX_DOC_BYTES);
   } catch {
     return null;
   }
 
   const sources = [real];
   // A file whose entire content is a bare filename is the symlink-as-text
-  // idiom above; treat it as a pointer, not as a rules file with one odd line.
+  // idiom above; treat it as a pointer, not as a doc with one odd line.
   const bare = text.trim();
   if (/^[\w./-]+\.(?:md|markdown)$/i.test(bare)) {
-    const target = readRulesFile(path.resolve(path.dirname(real), bare), depth + 1, seen);
+    const target = readDocFile(path.resolve(path.dirname(real), bare), depth + 1, seen);
     if (target) return { text: target.text, sources: sources.concat(target.sources) };
     return { text, sources };
   }
@@ -304,7 +313,7 @@ function readRulesFile(file, depth = 0, seen = new Set()) {
       out.push(line);
       continue;
     }
-    const target = readRulesFile(path.resolve(path.dirname(real), imp[1]), depth + 1, seen);
+    const target = readDocFile(path.resolve(path.dirname(real), imp[1]), depth + 1, seen);
     if (target) {
       out.push(target.text);
       sources.push(...target.sources);
@@ -316,12 +325,18 @@ function readRulesFile(file, depth = 0, seen = new Set()) {
 }
 
 /**
- * Find and read the rules files governing `cwd`, walking up to the repo root.
+ * Find and read the project doc(s) governing `cwd`, walking up to the repo
+ * root.
  *
  * Returns `{ text, sources }` with every discovered file concatenated, or
  * `null` when there are none. Never throws.
+ *
+ * This is the former `discoverRules`, renamed: the file-finding logic is
+ * unchanged (same filenames, same symlink and `@import` resolution, same
+ * repo-root stop), but rules no longer come from here. Its only remaining
+ * consumer is `extractCommands`, via `runLocalRules` below.
  */
-function discoverRules(cwd) {
+function readProjectDoc(cwd) {
   if (!cwd || typeof cwd !== 'string') return null;
   const texts = [];
   const sources = [];
@@ -334,14 +349,14 @@ function discoverRules(cwd) {
   }
 
   for (let i = 0; i < MAX_PARENT_WALK; i++) {
-    for (const name of RULES_FILENAMES) {
-      const found = readRulesFile(path.join(dir, name), 0, seen);
+    for (const name of PROJECT_DOC_FILENAMES) {
+      const found = readDocFile(path.join(dir, name), 0, seen);
       if (found) {
         texts.push(found.text);
         sources.push(...found.sources);
       }
     }
-    // Stop at the repo root -- rules above it belong to another project.
+    // Stop at the repo root -- content above it belongs to another project.
     try {
       if (fs.existsSync(path.join(dir, '.git'))) break;
     } catch {
@@ -354,87 +369,6 @@ function discoverRules(cwd) {
 
   if (texts.length === 0) return null;
   return { text: texts.join('\n'), sources };
-}
-
-/**
- * Strip fenced code blocks before matching PROSE rules.
- *
- * Without this, a README documenting `npm test` inside a shell fence reads as
- * the rule "run tests". The fences are still parsed separately by
- * `extractCommands` — the same text answers two different questions, and
- * conflating them is what makes 35.7%-pure-documentation files look like rule
- * files.
- */
-function stripFences(text) {
-  return text.replace(/^```[\s\S]*?^```/gm, '\n');
-}
-
-/**
- * Rule instances found in a rules file, deduplicated by family.
- *
- * A line only counts when it reads as an instruction. Requiring a directive
- * verb is what keeps `## Testing\nThe test suite uses vitest.` — reference
- * prose, which is most of a real CLAUDE.md — from registering as a rule.
- */
-const DIRECTIVE = /\b(?:must|should|always|never|do not|don'?t|ensure|make sure|required?|need to|before|after|no\b)\b|^\s*[-*]\s|^\s*\d+\.\s/i;
-
-/**
- * Per-rule enforcement, written by the user as a trailing marker:
- *
- *   - Always run tests after changing code. [block]
- *   - Run lint before opening a PR. [notify]
- *
- * Three levels, because the three hook channels reach different audiences and
- * carry very different risk:
- *
- * - `inform` (DEFAULT) — `hookSpecificOutput.additionalContext`. The model sees
- *   it and can act; the turn still ends. No loop is possible.
- * - `block` — `decision:"block"`. The model sees it and the turn CANNOT end.
- *   Opt-in per rule, never a default: anthropics/claude-code#55754 records a
- *   blocking Stop hook burning ~50 minutes and a whole session quota because the
- *   agent could not satisfy it. `review.js` additionally refuses to block when
- *   `stop_hook_active` is set, and when the violation has no available remedy.
- * - `notify` — `systemMessage`, the user only. What every finding used to be,
- *   kept for rules a user wants to watch without steering the agent.
- *
- * Defaulting to `inform` rather than `notify` is the deliberate change: a rules
- * gate whose findings never reach the agent is only a reporting tool.
- */
-const ENFORCEMENT_MARKER = /[[(](block|blocking|inform|notify|warn)[\])]\s*$/i;
-const ENFORCEMENT_ALIAS = { blocking: 'block', warn: 'notify' };
-
-function parseEnforcement(line) {
-  const m = ENFORCEMENT_MARKER.exec(String(line).trim());
-  if (!m) return 'inform';
-  const raw = m[1].toLowerCase();
-  return ENFORCEMENT_ALIAS[raw] || raw;
-}
-
-function extractRules(text) {
-  if (!text || typeof text !== 'string') return [];
-  const found = new Map();
-  for (const raw of stripFences(text).split('\n')) {
-    const line = raw.trim();
-    if (!line || line.length > 400) continue;
-    if (!DIRECTIVE.test(line)) continue;
-    for (const f of RULE_FAMILIES) {
-      if (found.has(f.family)) continue;
-      if (f.detect.test(line)) {
-        found.set(f.family, {
-          family: f.family,
-          label: f.label,
-          computable: f.computable,
-          enforcement: parseEnforcement(line),
-          text: line
-            .replace(/^\s*(?:[-*]|\d+\.)\s*/, '')
-            .replace(ENFORCEMENT_MARKER, '')
-            .trim()
-            .slice(0, 200),
-        });
-      }
-    }
-  }
-  return [...found.values()];
 }
 
 /**
@@ -605,11 +539,11 @@ function decide(family, facts) {
 }
 
 /**
- * Evaluate every discovered rule against the facts.
+ * Evaluate every rule against the facts.
  *
  * Returns `{ violations, passes, unknowns, unchecked, reports }` where
- * `unchecked` names the rules the user wrote that no deterministic checker can
- * score. Nothing here calls a model or touches the network.
+ * `unchecked` names rules the service turned on that no deterministic checker
+ * can score. Nothing here calls a model or touches the network.
  */
 function evaluateRules(rules, facts) {
   const violations = [];
@@ -633,12 +567,13 @@ function evaluateRules(rules, facts) {
   return { violations, passes, unknowns, unchecked, reports };
 }
 
-/** The rule family each documented command category would enable. */
+/** The rule family each documented command category would enable. `verb` is
+ * gone: it only ever fed the retired paste-a-line offer text. */
 const CATEGORY_RULE = {
-  test: { family: 'tests-ran', verb: 'run' },
-  lint: { family: 'lint-ran', verb: 'run' },
-  typecheck: { family: 'typecheck-ran', verb: 'run' },
-  build: { family: 'build-ran', verb: 'run' },
+  test: { family: 'tests-ran' },
+  lint: { family: 'lint-ran' },
+  typecheck: { family: 'typecheck-ran' },
+  build: { family: 'build-ran' },
 };
 
 /**
@@ -652,9 +587,14 @@ const CATEGORY_RULE = {
  * repos, a 1.52× expansion, with no new authoring burden: the answer is already
  * in the user's own file.
  *
- * Returns `[{ category, command, family, line }]`, where `line` is the exact
- * text to paste. Empty when every documented category already has a rule — the
- * common good case, and the one that must stay silent.
+ * Returns `[{ category, command, family, hint }]`, where `hint` names the
+ * dashboard control to turn on -- NOT a line to paste. A rule now lives on the
+ * connected account, so the offer's mechanism changed along with everything
+ * else that moved server-side: pasting into AGENTS.md/CLAUDE.md no longer
+ * does anything, and an offer that still told the user to do that would send
+ * them to edit a file the client stopped reading. Empty when every documented
+ * category already has a rule — the common good case, and the one that must
+ * stay silent.
  */
 function proposeGates(rules, commands) {
   const have = new Set((rules || []).map((r) => r.family));
@@ -668,24 +608,27 @@ function proposeGates(rules, commands) {
       category: c.category,
       command: c.command,
       family: spec.family,
-      line: `- Always ${spec.verb} \`${c.command}\` after changing code.`,
+      hint: `Turn on the \`${spec.family}\` check in your Prooftrail rules — this repo documents \`${c.command}\`.`,
     });
   }
   return out;
 }
 
 /**
- * The offer, as text. Deliberately shows the exact line to paste rather than
- * describing it -- guidance that names an intent without giving the mechanism
- * gets improvised into something else.
+ * The offer, as text. Deliberately names the exact check family and where to
+ * turn it on rather than describing the idea in general terms -- guidance
+ * that names an intent without giving the mechanism gets improvised into
+ * something else. The mechanism used to be a markdown line to paste; now it
+ * is a named dashboard control, so that is what gets named, plus one trailing
+ * link line rather than one repeated per offer.
  */
 function formatOffers(offers, sources) {
   if (!offers || offers.length === 0) return '';
   const file = sources && sources.length ? basename(sources[0]) : 'AGENTS.md';
   const head =
     `Prooftrail found no rule it can check, but your ${file} documents ` +
-    `${offers.length === 1 ? 'a command' : 'commands'} it could gate on. Add to ${file}:`;
-  return `${head}\n${offers.map((o) => o.line).join('\n')}`;
+    `${offers.length === 1 ? 'a command' : 'commands'} it could gate on:`;
+  return `${head}\n${offers.map((o) => `- ${o.hint}`).join('\n')}\nSet them at ${DASHBOARD_RULES_URL}`;
 }
 
 /**
@@ -760,6 +703,23 @@ function statesBlocked(finalMessage) {
  * agent could plausibly act on it. Everything demoted for un-remediability
  * still travels as `inform`, so the finding is never lost — only its power to
  * halt the turn is.
+ *
+ * ALSO routes `evaluation.reports` (whole-branch review, finding 6) into the
+ * SAME `informing`/`notifying` buckets `formatViolations` already renders --
+ * before this fix, `evaluateRules`'s `reports` array (the FACTS `decide`
+ * returns a `report` status for, e.g. `no-commit-without-permission`'s "a
+ * commit ran this turn") was computed and then never read by anything, so a
+ * user who turned that check on and expected the "Report commits and pushes"
+ * label to mean something got total silence on every channel at every level.
+ * A report NEVER reaches `blocking`, regardless of its own `enforcement`
+ * value -- rulesDb.ts's catalog only ever offers `off`/`inform`/`notify` for a
+ * report-shaped family (never `block`, enforced twice: dashboard.ts's CATALOG
+ * and rulesDb.ts's NON_BLOCKABLE_FAMILIES), and even if that were somehow
+ * bypassed, a report is a FACT ("a commit happened"), not a verdict on
+ * whether it was authorised -- there is nothing here for `canRemedy`/`
+ * conceded` to reason about, and halting a turn over an unverdicted fact
+ * would attest a heuristic as a measurement, the exact thing `decide`'s
+ * `no-commit-without-permission` branch exists to avoid.
  */
 function routeFindings(evaluation, commands, finalMessage) {
   const blocking = [];
@@ -772,6 +732,11 @@ function routeFindings(evaluation, commands, finalMessage) {
     else if (level === 'block' && !conceded && canRemedy(v, commands)) blocking.push(v);
     else informing.push(v);
   }
+  for (const r of (evaluation && evaluation.reports) || []) {
+    const level = r.enforcement || 'inform';
+    if (level === 'notify') notifying.push(r);
+    else informing.push(r); // never `blocking` -- see doc comment above
+  }
   return { blocking, informing, notifying, conceded };
 }
 
@@ -782,16 +747,22 @@ function formatViolations(list) {
 }
 
 /**
- * The whole local pass, end to end. `parsed` is `parseTranscript`'s output.
+ * The whole local pass, end to end. `parsed` is `parseTranscript`'s output;
+ * `cached` is `readRulesCache()`'s output (Task 4) — the signed rule set the
+ * service last delivered, or `null` when there is none.
+ *
+ * Rules come from the cache exclusively via `rulesFromCache` — nothing here
+ * reads a project file to decide what to check. The project doc is still read,
+ * for `extractCommands` alone, so an unconnected (or under-configured) install
+ * can still offer a gate on a command it already documents.
  *
  * Never throws: a rules-engine failure must not break a Stop hook (ADR-004).
  */
-function runLocalRules(cwd, parsed) {
+function runLocalRules(cwd, parsed, cached) {
   try {
-    const discovered = discoverRules(cwd);
-    if (!discovered) return null;
-    const rules = extractRules(discovered.text);
-    const commands = extractCommands(discovered.text);
+    const { rules, judgment, unknown } = rulesFromCache(cached);
+    const doc = readProjectDoc(cwd);
+    const commands = extractCommands((doc && doc.text) || '');
     const facts = collectFacts(parsed);
     const evaluation = evaluateRules(rules, facts);
     // Only offered when the engine can check NOTHING today. A user who already
@@ -802,11 +773,17 @@ function runLocalRules(cwd, parsed) {
     // face. `/prooftrail:rules` shows the full list on demand instead.
     const checkable = rules.filter((r) => r.computable).length;
     return {
-      sources: discovered.sources,
+      sources: (doc && doc.sources) || [],
       rules,
+      // Judgment rules ride alongside, but never through `evaluation` --
+      // `evaluateRules`/`decide` only ever see `rules` (the computable-or-
+      // unchecked list `rulesFromCache` builds from `checks`). The caller
+      // (review.js) hands `judgment` to `prependHouseRules` directly.
+      judgment,
       commands,
       facts,
       evaluation,
+      unknown,
       offers: checkable === 0 ? proposeGates(rules, commands) : [],
       allOffers: proposeGates(rules, commands),
     };
@@ -817,9 +794,8 @@ function runLocalRules(cwd, parsed) {
 
 module.exports = {
   RULE_FAMILIES,
-  discoverRules,
-  readRulesFile,
-  extractRules,
+  readProjectDoc,
+  rulesFromCache,
   extractCommands,
   collectFacts,
   decide,

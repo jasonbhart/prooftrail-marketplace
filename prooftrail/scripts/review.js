@@ -22,14 +22,17 @@ const {
   resolvePromptId,
   shouldShowQuotaNotice,
   shouldShowGateOffer,
+  shouldShowConnectNotice,
   idempotencyKey,
 } = require('./lib');
 const { runLocalRules, collectFacts, routeFindings, formatViolations, formatOffers } = require('./rules');
+const { readRulesCache, writeRulesCache, cachePath } = require('./rules-cache');
 const {
   RECURSION_ENV,
   detectUncorroboratedClaims,
   startJob,
   collectJob,
+  awaitJob,
   formatJob,
 } = require('./delegate');
 
@@ -127,16 +130,44 @@ async function main() {
   let localForModel = '';   // inform-level: additionalContext
   let blockReason = '';     // block-level: decision:"block"
   let gateOffer = '';
-  // The rules the local engine CANNOT decide. These are the only ones the
-  // judge is asked about -- see prependHouseRules for why the split is exact.
+  // Judgment rules: measured PROSE the service ships for judgment families
+  // that are `on` (rulesDb.ts's `judgment_prose`, inside the same signed
+  // cache as `checks`), turned into `{family, label, computable: false,
+  // enforcement: 'judge', text}` objects by rulesFromCache. Never a computable
+  // rule, and never routed through routeFindings -- see prependHouseRules for
+  // why the split between this and the local evaluator's findings is exact.
   let judgmentRules = [];
+  // How many families the CACHE mentioned that this client's RULE_FAMILIES
+  // does not know -- an old client talking to a newer service.
+  let unknownChecks = 0;
   // Computed from the transcript DIRECTLY, not via runLocalRules -- that
   // returns null when the project has no rules file, and a false "tests pass"
   // is worth checking whether or not anyone wrote a rule about tests.
   const localFacts = collectFacts(parsedTranscript);
+  // Task 5: rules come from the signed cache Task 4 verifies, never from a
+  // repo file -- a file in the repo is editable by the agent being checked,
+  // which is the whole reason rules moved server-side. `null` covers "never
+  // connected" and "cache failed verification" identically by design
+  // (rules-cache.js's contract: unverifiable is treated exactly like absent,
+  // never like a partial or downgraded rule set).
+  const cachedRules = readRulesCache();
+  // A cache FILE that exists but failed verification is a DIFFERENT situation
+  // from never having one -- tampering or corruption, not "not connected yet"
+  // -- and a user who believed a `block` rule was still enforced deserves to
+  // know it silently stopped being enforced, not just see the generic
+  // not-connected copy below.
+  let cacheTamperedNotice = '';
   try {
-    const local = runLocalRules(evt.cwd, parsedTranscript);
-    judgmentRules = (local && local.evaluation && local.evaluation.unchecked) || [];
+    if (!cachedRules && fs.existsSync(cachePath())) {
+      cacheTamperedNotice = 'Prooftrail: local rule cache failed verification (tampered or corrupted) — ignoring it.';
+    }
+  } catch {
+    /* fail-soft: this is a notice, never the gate */
+  }
+  try {
+    const local = runLocalRules(evt.cwd, parsedTranscript, cachedRules);
+    judgmentRules = (local && local.judgment) || [];
+    unknownChecks = (local && local.unknown) || 0;
 
     // Each violation travels on the channel its own rule asked for. Default is
     // `inform` -- the model sees it, the turn still ends. A rules gate whose
@@ -173,33 +204,93 @@ async function main() {
     blockReason = '';
     gateOffer = '';
     judgmentRules = [];
+    unknownChecks = 0;
   }
 
-  // ---- the optional LOCAL AGENT pass (ADR-012) ------------------------------
-  // Detached and reported a turn late, so it adds one `spawn` to this turn and
-  // nothing else. Collect BEFORE starting, so a finished answer is surfaced
-  // rather than replaced by a fresh job.
+  // ---- the optional LOCAL AGENT pass (ADR-012, Task 7) ----------------------
+  // `deep_check` is now a server-held setting, delivered inside the same
+  // signed cache as every other rule (rules-cache.js) -- not a client env var
+  // choice. `off` means "do nothing" and is also the fallback when there is
+  // no cache at all (never connected, or a tampered cache that failed
+  // verification): a Stop hook must never start WAITING on a check nobody on
+  // the account authorized.
+  //
+  //   off    -- the pass is skipped entirely (pre-Task-7 default).
+  //   inform -- unchanged ADR-012 behaviour: detached, reported next turn.
+  //   await  -- additionally waits up to AWAIT_WINDOW_S for THIS turn's job
+  //             and can block on a refutation. See delegate.js's awaitJob for
+  //             why the window expiring does not kill the job.
   let agentFinding = '';
   try {
-    agentFinding = formatJob(collectJob(evt.session_id));
-    const claims = detectUncorroboratedClaims(finalMessage, localFacts);
-    if (claims.length) startJob(evt.session_id, evt.cwd, claims, localFacts);
+    const deepMode = (cachedRules && cachedRules.rules && cachedRules.rules.deep_check) || 'off';
+    if (deepMode !== 'off') {
+      // Collect BEFORE starting, so a finished answer is surfaced rather than
+      // replaced by a fresh job (unchanged from ADR-012).
+      const prior = collectJob(evt.session_id);
+      if (prior && prior.verdict === 'RETRYING') {
+        // Exactly one retry (delegate.js's collectJob; borrowed from
+        // agy-code-review.sh's AGY_RETRY_ON_EMPTY -- "even on exit 0, empty
+        // means something went wrong"). A do-over, not a finding: nothing is
+        // emitted for it, this turn or ever -- only the eventual real verdict
+        // (or the final NO_OUTPUT once the retry also comes up empty) is.
+        startJob(evt.session_id, evt.cwd, [{ claim: prior.claim, why: 'previous attempt produced no output' }], localFacts);
+      } else {
+        if (prior) agentFinding = formatJob(prior);
+        const claims = detectUncorroboratedClaims(finalMessage, localFacts);
+        if (claims.length) {
+          const started = startJob(evt.session_id, evt.cwd, claims, localFacts);
+          if (started && deepMode === 'await') {
+            // NO progress note is possible here. The hook protocol is ONE
+            // JSON object per invocation, so a "verifying..." line written
+            // now would corrupt the object written at the end -- the user's
+            // only feedback that the hook is working is Claude Code's own
+            // hook-running indicator.
+            const verdict = await awaitJob(evt.session_id);
+            if (verdict && verdict.verdict === 'RETRYING') {
+              // Landed inside the window but came back empty -- same rule as
+              // above: retry once, emit nothing.
+              startJob(evt.session_id, evt.cwd, [{ claim: verdict.claim, why: 'previous attempt produced no output' }], localFacts);
+            } else if (verdict && verdict.verdict === 'FALSE') {
+              // Merge rather than overwrite: a local-rules block from earlier
+              // in this same function must not be silently discarded just
+              // because the deep check also refuted something.
+              blockReason = [blockReason, formatJob(verdict)].filter(Boolean).join('\n');
+            } else if (verdict) {
+              agentFinding = [agentFinding, formatJob(verdict)].filter(Boolean).join('\n\n');
+            }
+            // else: the window expired without an answer. The job keeps
+            // running toward its own JOB_TIMEOUT_S ceiling (delegate.js) and
+            // is collected as `prior` on the NEXT turn -- `await` only
+            // changes WHEN the answer lands, never WHETHER it does.
+          }
+        }
+      }
+    }
   } catch {
     agentFinding = ''; // fail-soft: an optional deep check never breaks a session
   }
 
   const token = findToken();
   if (!token) {
-    // Still worth saying: the local half of the product works unauthenticated.
+    // Still worth saying: the local half of the product works unauthenticated
+    // -- IF a rule cache exists. Without a token there is never a way to have
+    // fetched one, so this is realistically always "no rules configured", but
+    // the check is written against `cachedRules` (not `!token`) so it reads
+    // correctly if that ever changes.
     const unauth = [];
     if (localFindings) unauth.push(`Prooftrail (local rules):\n${localFindings}`);
     if (agentFinding) unauth.push(agentFinding);
     if (gateOffer) unauth.push(gateOffer);
+    if (cacheTamperedNotice) unauth.push(cacheTamperedNotice);
+    if (unknownChecks > 0) unauth.push(`Prooftrail: ${unknownChecks} newer check(s) need a plugin update.`);
     unauth.push(
       localFindings || gateOffer || agentFinding || localForModel || blockReason
         ? 'Not connected — run /prooftrail:setup to add hosted review.'
         : 'Prooftrail: not connected — run /prooftrail:setup to enable reviews.',
     );
+    if (!cachedRules && shouldShowConnectNotice(evt.session_id)) {
+      unauth.push('Prooftrail: connect to enable rule checks — /prooftrail:setup.');
+    }
     emitHookOutput({
       systemMessage: unauth.join('\n\n'),
       additionalContext: localForModel ? `Prooftrail (your rules):\n${localForModel}` : '',
@@ -230,6 +321,8 @@ async function main() {
     if (localFindings) parts.push(`Prooftrail (local rules):\n${localFindings}`);
     if (agentFinding) parts.push(agentFinding);
     if (gateOffer) parts.push(gateOffer);
+    if (cacheTamperedNotice) parts.push(cacheTamperedNotice);
+    if (unknownChecks > 0) parts.push(`Prooftrail: ${unknownChecks} newer check(s) need a plugin update.`);
     if (text) parts.push(text);
     emitHookOutput({
       systemMessage: parts.join('\n'),
@@ -325,6 +418,16 @@ async function main() {
     return;
   }
 
+  // Persist the rule set the service just sent, for the NEXT turn. THIS turn
+  // was evaluated against the cache read at the top of main() -- rules are
+  // always at most one turn behind, which is the caching decision this module
+  // accepts explicitly (a Stop hook cannot block on a network fetch).
+  try {
+    if (result && result.rules) writeRulesCache({ ...result.rules, fetched_at: Date.now() });
+  } catch {
+    // fail-soft: a cache write failure must not affect the review just returned
+  }
+
   // Compose one systemMessage from the pin notice + advisory feedback
   // (revise) + quota notice (F14) -- exactly one stdout write regardless of
   // how many of these apply.
@@ -335,6 +438,8 @@ async function main() {
   if (localFindings) parts.push(`Prooftrail (local rules):\n${localFindings}`);
   if (agentFinding) parts.push(agentFinding);
   if (gateOffer) parts.push(gateOffer);
+  if (cacheTamperedNotice) parts.push(cacheTamperedNotice);
+  if (unknownChecks > 0) parts.push(`Prooftrail: ${unknownChecks} newer check(s) need a plugin update.`);
   if (result.verdict === 'revise') {
     // T2.1: bound + strip before injecting.
     const clean = typeof result.feedback === 'string' ? sanitizeFeedback(result.feedback) : '';

@@ -179,6 +179,27 @@ function shouldShowGateOffer(sessionId, nowMs = Date.now()) {
   }
 }
 
+function connectNoticeMarkerPath(sessionId, nowMs) {
+  return path.join(stateDir(), `connect-notice-${safeSessionId(sessionId)}-${utcDateStr(nowMs)}.json`);
+}
+
+/**
+ * Task 5: with local rule definitions removed, an unconnected install performs
+ * no checks at all -- there is no cache, so `rulesFromCache` returns nothing.
+ * That is worth saying, but the Stop loop runs every turn, so it is capped at
+ * once per (session_id, UTC day) exactly like the gate offer above, and for
+ * the same reason and with the same fail-soft default: an unsolicited notice
+ * defaults to STAYING SILENT on an fs error rather than repeating forever.
+ */
+function shouldShowConnectNotice(sessionId, nowMs = Date.now()) {
+  try {
+    fs.writeFileSync(connectNoticeMarkerPath(sessionId, nowMs), '1', { flag: 'wx' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Credential chain per ADR-007: env -> sensitive userConfig -> data-dir file. */
 function findToken() {
   if (process.env.REVIEWSVC_TOKEN) return process.env.REVIEWSVC_TOKEN;
@@ -1575,6 +1596,7 @@ module.exports = {
   resolvePromptId,
   shouldShowQuotaNotice,
   shouldShowGateOffer,
+  shouldShowConnectNotice,
   idempotencyKey,
   pluginRoots,
   diagnose,

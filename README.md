@@ -4,7 +4,8 @@ Claude Code / Cowork marketplace hosting the **Prooftrail** plugin: it checks
 whether your AI coding agent followed **the rules you set**, at the end of every
 turn.
 
-There are two halves, and the first one needs nothing from us.
+Your rules live on the service so the agent cannot edit them; the checking runs
+on your machine, where the evidence actually is.
 
 ## Install
 
@@ -12,14 +13,23 @@ There are two halves, and the first one needs nothing from us.
 /plugin marketplace add jasonbhart/prooftrail-marketplace
 ```
 
-Then install `prooftrail`. **That is enough for local rule checking** — no
-account, no signup, no network. Run `/prooftrail:setup` only if you also want
-the hosted judge.
+Then install `prooftrail` and run **`/prooftrail:setup`** to connect it.
 
-## The local half — free, offline, no account
+> **Changed in 0.8.0, and it is a breaking change.** Rules used to be written in
+> your `AGENTS.md`. They are not read from any file any more, and **an
+> unconnected install performs no checks at all.**
+>
+> The reason is the point of the product: a file in your repo is a file the
+> agent being checked can edit. It could downgrade its own enforcement level, or
+> delete a rule it kept failing, and nothing would notice. Rules now live on the
+> service, signed, and the client verifies that signature before trusting them.
 
-Prooftrail reads your `AGENTS.md` or `CLAUDE.md` (following symlinks and
-`@imports`) and checks the rules that can be checked mechanically:
+## Your rules, set once, enforced on your machine
+
+Set them at **[the dashboard](https://supervisor-dashboard.pages.dev/rules)** —
+a list of checks, each `off`, `inform` (tell the agent) or `block` (the agent
+cannot end its turn until it is addressed). Your machine does the checking, from
+the session's own tool calls:
 
 | Rule you wrote | What it checks |
 |---|---|
@@ -29,20 +39,27 @@ Prooftrail reads your `AGENTS.md` or `CLAUDE.md` (following symlinks and
 | "Don't claim done until it's verified" | whether verification ran **after** the last code edit |
 | "Never commit without asking" | reports when a commit/push happened — it does not judge whether you approved it |
 
-This runs entirely on your machine. No model is called and nothing is sent
-anywhere. It is fast: ~240 ms on a 15 MB session transcript.
+**The checking still runs entirely on your machine** — no model is called for it
+and your code is never sent anywhere, which is why it can read the full command
+text a redacted payload could never carry. What comes from the service is the
+rule *definitions*, so the agent cannot quietly weaken them. ~240 ms on a 15 MB
+session transcript.
+
+**Offline is fine.** The verified rule set is cached, so an outage keeps your
+checks running. After a week without contact a `block` softens to `inform`, so a
+stale rule cannot halt your work indefinitely.
 
 **Rules it cannot check are named, not silently ignored.** "Follow existing
 patterns", "handle errors properly", "stay in scope" — these have no
 deterministic answer, so Prooftrail says so rather than pretending.
 
-**No rules written yet? It offers gates from commands you already documented.**
+**No rules set yet? It offers checks based on commands your repo already documents.**
 Most of a real `AGENTS.md` is reference, not rules — across 2,203 public repos,
 35% document a test command and only 23% state it as a rule. If your file has a
 commands section, Prooftrail proposes the exact line to paste:
 
 ```
-- Always run `npm test` after changing code.
+Turn on the `tests-ran` check — this repo documents `npm test`.
 ```
 
 That offer appears **at most once per session**, and only when nothing is
@@ -53,23 +70,18 @@ not checkable, and every gate available to you.
 **"Unknown" is never reported as a pass.** If no test ran at all, a "tests must
 pass" rule comes back *unknown*, not *satisfied*.
 
-### You choose what each rule does when it's broken
+### You choose what each check does when it fails
 
-End any rule with a marker:
+Per check, in the dashboard:
 
-| Marker | What happens |
+| Level | What happens |
 |---|---|
-| *(none)* — **default** | The agent is told, and can act on it. The turn still ends. |
-| `[block]` | The agent **cannot end the turn** until it's addressed. |
-| `[notify]` | Only you are told. The agent is not steered. |
+| `inform` | The agent is told, and can act on it. The turn still ends. |
+| `block` | The agent **cannot end the turn** until it's addressed. |
+| `notify` | Only you are told. The agent is not steered. |
+| `off` | Not checked. |
 
-```
-- Always run tests after changing code. [block]
-- Run lint before opening a PR.
-- Never commit without asking. [notify]
-```
-
-`[block]` is deliberately hard to misuse. It fires **at most once per turn**, it
+`block` is deliberately hard to misuse. It fires **at most once per turn**, it
 is skipped when the fix isn't available (no test command in the repo means "run
 the tests" is not a fair demand), and it stands down when the agent says it
 can't proceed. In every one of those cases the finding still reaches the agent —

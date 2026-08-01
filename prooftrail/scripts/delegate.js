@@ -236,9 +236,21 @@ function buildPrompt(claims, facts) {
     .join('\n');
 }
 
-/** Wall-clock ceiling for one delegated review, and the SIGTERM grace after. */
-const JOB_TIMEOUT_S = Number(process.env.PROOFTRAIL_AGENT_TIMEOUT_S || 600);
+/**
+ * The JOB's own ceiling, in BOTH modes -- down from 600 (spec 2026-07-31).
+ * The SIGTERM grace after it is `JOB_KILL_AFTER_S`.
+ */
+const JOB_TIMEOUT_S = Number(process.env.PROOFTRAIL_AGENT_TIMEOUT_S || 300);
 const JOB_KILL_AFTER_S = Number(process.env.PROOFTRAIL_AGENT_KILL_AFTER_S || 30);
+/**
+ * How long the HOOK waits in `await` mode before giving up on THIS turn. A
+ * DIFFERENT clock from `JOB_TIMEOUT_S` above, and conflating the two breaks
+ * the design: when this window expires the job is NOT killed -- it keeps
+ * running toward its own `JOB_TIMEOUT_S` ceiling and is collected on the next
+ * turn. `await` therefore only changes WHEN an answer lands, never WHETHER it
+ * does, which is what makes waiting safe to switch on at all. See `awaitJob`.
+ */
+const AWAIT_WINDOW_S = Number(process.env.PROOFTRAIL_AGENT_AWAIT_S || 120);
 
 /**
  * `[cmd, argv]` wrapped in coreutils `timeout` when it exists, else unchanged.
@@ -290,9 +302,20 @@ function startJob(sessionId, cwd, claims, facts, env = process.env) {
     const out = outPath(sessionId);
     // One job per session at a time: a still-running job must not be replaced,
     // and a finished one must be read before another starts.
+    //
+    // This same read also carries the retry counter forward. `collectJob`
+    // deliberately leaves the JOB FILE in place (only `out` is removed) when
+    // it reports a `RETRYING` verdict, precisely so this startJob call -- the
+    // do-over -- can read `prev.attempt` off it. Borrowed from
+    // agy-code-review.sh's AGY_RETRY_ON_EMPTY ("even on exit 0, empty means
+    // something went wrong"): exactly ONE retry, because when the cause is
+    // NOT transient (an expired CLI login) the user pays double before
+    // learning, and that is the ceiling.
+    let previousAttempt = 0;
     try {
       const prev = JSON.parse(fs.readFileSync(job, 'utf8'));
       if (isAlive(prev.pid) || fs.existsSync(out)) return null;
+      previousAttempt = Number(prev.attempt) || 0;
     } catch {
       /* no previous job */
     }
@@ -327,7 +350,13 @@ function startJob(sessionId, cwd, claims, facts, env = process.env) {
 
     fs.writeFileSync(
       job,
-      JSON.stringify({ pid: child.pid, agent: agent.name, started: Date.now(), claim: claims[0].claim }),
+      JSON.stringify({
+        pid: child.pid,
+        agent: agent.name,
+        started: Date.now(),
+        claim: claims[0].claim,
+        attempt: previousAttempt + 1,
+      }),
     );
     return agent.name;
   } catch {
@@ -360,7 +389,10 @@ function collectJob(sessionId) {
   } catch {
     /* produced nothing */
   }
-  try { fs.unlinkSync(job); } catch {}
+  // `out` is removed unconditionally -- an empty/stale output file must never
+  // survive to be misread as this job's answer. `job` is NOT removed yet: the
+  // retry branch below needs it left in place (see the comment there), and
+  // every OTHER return path below removes it explicitly before returning.
   try { fs.unlinkSync(out); } catch {}
 
   // A finished job that produced NOTHING is a visible state, never silence.
@@ -376,9 +408,26 @@ function collectJob(sessionId) {
   // ceiling hit the timeout. agy-code-review.sh makes the same distinction by
   // treating exit 124/137/143 separately from any other failure.
   if (!text) {
+    const attempt = meta.attempt || 1;
+    // ONE retry, and exactly one. Borrowed from agy-code-review.sh's
+    // AGY_RETRY_ON_EMPTY: "even on exit 0, empty means something went wrong"
+    // -- a silent crash or stall is often transient. When it is NOT transient
+    // (an expired CLI login) the user pays double before learning, and that
+    // is the ceiling -- never retry twice.
+    if (attempt < 2) {
+      // Leave the JOB FILE in place on purpose. `startJob`'s existing
+      // one-job-per-session guard already reads this same file to decide
+      // whether it is safe to start a new job -- reusing that read is what
+      // lets the retry's `startJob` call learn `attempt` without a second
+      // piece of persisted state. Only `out` (already gone, above) blocked
+      // that guard, so the retry is free to proceed immediately.
+      return { agent: meta.agent, claim: meta.claim, verdict: 'RETRYING', attempt };
+    }
+    try { fs.unlinkSync(job); } catch {}
     const elapsed_s = Math.round((Date.now() - (meta.started || Date.now())) / 1000);
     return { agent: meta.agent, claim: meta.claim, verdict: 'NO_OUTPUT', body: '', elapsed_s };
   }
+  try { fs.unlinkSync(job); } catch {}
 
   // Keep only the verdict line and its evidence. An agentic CLI can emit
   // banners, token counts and ANSI colour; injecting that into a session is
@@ -428,6 +477,11 @@ function collectJob(sessionId) {
  */
 function formatJob(result) {
   if (!result || result.verdict === 'TRUE') return '';
+  // A do-over, not a finding (see collectJob's retry branch) -- the caller is
+  // expected to start a fresh job and say nothing this turn. Handled here too
+  // so a caller that forgets that contract degrades to silence rather than to
+  // a message built from `result.body`, which RETRYING never carries.
+  if (result.verdict === 'RETRYING') return '';
   if (result.verdict === 'NO_OUTPUT') {
     const s = Number(result.elapsed_s) || 0;
     const cause =
@@ -444,9 +498,34 @@ function formatJob(result) {
   return `${head}\n  claim: "${String(result.claim).slice(0, 200)}"\n  ${result.body}`;
 }
 
+/**
+ * Wait up to `windowMs` for a running job, polling for completion. Used only
+ * by `deep_check: 'await'` (Task 7) -- `inform` mode never calls this and
+ * keeps the original detached, reported-next-turn behaviour (ADR-012).
+ *
+ * When the window expires this returns `null` and DELIBERATELY LEAVES THE JOB
+ * RUNNING -- it is a completely different clock from the job's own
+ * `JOB_TIMEOUT_S` ceiling, and killing the job here would be the bug this
+ * function exists to avoid. The job keeps running toward that ceiling and is
+ * collected on the next turn's `collectJob` call. `await` therefore only
+ * changes WHEN an answer lands, never WHETHER it does, which is what makes it
+ * safe to turn on at all.
+ */
+async function awaitJob(sessionId, windowMs = AWAIT_WINDOW_S * 1000) {
+  const deadline = Date.now() + windowMs;
+  for (;;) {
+    const r = collectJob(sessionId);
+    if (r) return r;
+    if (Date.now() >= deadline) return null;
+    await new Promise((res) => setTimeout(res, 500));
+  }
+}
+
 module.exports = {
   ADAPTERS,
   RECURSION_ENV,
+  JOB_TIMEOUT_S,
+  AWAIT_WINDOW_S,
   which,
   wrapWithTimeout,
   detectAgent,
@@ -455,5 +534,6 @@ module.exports = {
   buildPrompt,
   startJob,
   collectJob,
+  awaitJob,
   formatJob,
 };

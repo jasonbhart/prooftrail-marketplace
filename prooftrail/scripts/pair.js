@@ -104,7 +104,8 @@ async function main() {
     return;
   }
 
-  const { token, expires_at } = await res.json();
+  const body = await res.json();
+  const { token, expires_at } = body;
   if (typeof token !== 'string' || !token) {
     process.stderr.write('Prooftrail: pairing response missing token.\n');
     process.exitCode = 1;
@@ -129,6 +130,21 @@ async function main() {
     mode: 0o600,
     flag: 'wx',
   });
+
+  // Arm the install now, so its FIRST Stop is checked rather than its second
+  // (Task 7b, spec 2026-07-31): without this, rules only arrive on the first
+  // review RESPONSE, so the first turn after pairing is unchecked. Fail-soft:
+  // a write failure (missing/malformed `rules`, a signature that fails
+  // rules-cache.js's verification, a disk error) leaves pairing successful --
+  // the token above is already written, and the first review still delivers
+  // rules if this cache write never lands.
+  try {
+    if (body && body.rules) {
+      require('./rules-cache').writeRulesCache({ ...body.rules, fetched_at: Date.now() });
+    }
+  } catch {
+    // fail-soft: pairing succeeded; rules will arrive on the first review
+  }
 
   // Fix 5: confirm the pair stuck IN-PROCESS instead of the setup skill
   // shelling out to curl with the token interpolated into argv (visible in
